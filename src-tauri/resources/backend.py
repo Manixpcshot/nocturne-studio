@@ -24,6 +24,7 @@ import atexit
 from functools import lru_cache
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import urlsplit
 
 os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "45")
 
@@ -70,7 +71,17 @@ SDCPP_ASSETS = {
              ("cudart-sd-bin-win-cu12-x64.zip", 563452046,
               "fe20366827d357c00797eebb58244dddab7fd9a348d70090c3871004c320f38d")],
 }
+FLUX2_MODELS = {
+    "city96/FLUX.2-dev-gguf": "flux2_dev",
+    "leejet/FLUX.2-klein-4B-GGUF": "flux2_klein_4b",
+    "leejet/FLUX.2-klein-base-4B-GGUF": "flux2_base_4b",
+    "leejet/FLUX.2-klein-9B-GGUF": "flux2_klein_9b",
+    "leejet/FLUX.2-klein-base-9B-GGUF": "flux2_base_9b",
+}
+SDCPP_EDIT_RECIPES = {"flux_kontext", *FLUX2_MODELS.values()}
 SDCPP_RECIPES = {
+    **FLUX2_MODELS,
+    "QuantStack/FLUX.1-Kontext-dev-GGUF": "flux_kontext",
     "city96/FLUX.1-schnell-gguf": "flux_schnell",
     "city96/FLUX.1-dev-gguf": "flux_dev",
     "leejet/FLUX.1-schnell-gguf": "flux_schnell",
@@ -101,7 +112,14 @@ def emit_event(event, data):
         print(json.dumps({"event": event, "data": data}, ensure_ascii=False), file=sys.__stdout__, flush=True)
 
 
+TRANSFER_LIMIT = threading.local()
+
+
 def emit_progress(data):
+    if data.get("phase") == "retrying":
+        data.setdefault("retry_in", min(max(1, data.get("attempt", 2) - 1) * 3, 20))
+    if getattr(TRANSFER_LIMIT, "job_id", None):
+        data["job_id"] = TRANSFER_LIMIT.job_id
     emit_event("download-progress", data)
 
 
@@ -557,7 +575,14 @@ def aspect_dimensions(aspect_ratio, base):
 
 def image_settings(pipeline, model_id, aspect_ratio="1:1"):
     name = type(pipeline).__name__.lower()
-    if "zimage" in name:
+    if "flux2" in name:
+        quick = "klein" in name and "base" not in model_id.lower()
+        settings = dict(num_inference_steps=4 if quick else 24, guidance_scale=1.0 if quick else 4.0, width=1024, height=1024)
+    elif "fluxfill" in name or "fluxcontrol" in name:
+        settings = dict(num_inference_steps=35, guidance_scale=30.0, width=1024, height=1024)
+    elif "kontext" in name:
+        settings = dict(num_inference_steps=28, guidance_scale=2.5, width=768, height=768)
+    elif "zimage" in name:
         settings = dict(num_inference_steps=9, guidance_scale=0.0, width=768, height=768)
     elif "flux" in name:
         schnell = "schnell" in model_id.lower() or "turbo" in model_id.lower()
@@ -623,12 +648,17 @@ def generate(prompt, translated_override=None, warning_override=False, include_i
     translated, translation_warning = (translated_override, warning_override) if translated_override is not None else translate_prompt(prompt.strip(), torch)
     if not translated:
         raise RuntimeError("پرامپت خالی است.")
+    if re.search(r"flux(?:fill|control|kontext)", type(pipe).__name__.lower()):
+        raise RuntimeError("Open Edit and attach the required reference image for this FLUX model.")
     result = create_image(pipe, active_model, translated, selected_device, include_image, original_prompt=prompt, aspect_ratio=aspect_ratio, temporary=temporary, metadata=metadata)
     result["translation_warning"] = translation_warning
     return result
 
 
 def image_input_capability():
+    if active_kind == "sdcpp":
+        supports = sdcpp_models().get(active_model, {}).get("recipe") in SDCPP_EDIT_RECIPES
+        return {"supported": supports, "reason": "stable-diffusion.cpp · Reference image" if supports else "این مدل ورودی عکس ندارد."}
     if pipe is None or active_kind not in ("image", "checkpoint"):
         return {"supported": False, "reason": "مدل فعال Diffusers نیست؛ بااین‌حال می‌توانید تلاش دستی کنید."}
     try:
@@ -637,16 +667,16 @@ def image_input_capability():
         return {"supported": True, "reason": f"موتور ویرایش {type(converted).__name__} آماده است."}
     except Exception as error:
         import inspect
-        if "image" in inspect.signature(pipe.__call__).parameters:
+        if {"image", "control_image"} & set(inspect.signature(pipe.__call__).parameters):
             return {"supported": True, "reason": f"کلاس {type(pipe).__name__} مستقیماً ورودی عکس می‌گیرد؛ ویرایش آزمایشی است."}
         return {"supported": False, "reason": f"ویرایش خودکار برای {type(pipe).__name__} تأیید نشد: {str(error)[:180]}"}
 
 
-def edit_image(prompt, image_data_url, strength=0.65, aspect_ratio="1:1", temporary=False, metadata=None):
+def edit_image(prompt, image_data_url, strength=0.65, aspect_ratio="1:1", temporary=False, metadata=None, mask_data_url=None):
     import torch
     from diffusers import AutoPipelineForImage2Image
-    if pipe is None or active_kind not in ("image", "checkpoint"):
-        raise RuntimeError("این موتور فعلاً ورودی عکس را اجرا نمی‌کند؛ یک مدل Diffusers انتخاب کنید.")
+    if active_kind not in ("image", "checkpoint", "sdcpp") or (active_kind != "sdcpp" and pipe is None):
+        raise RuntimeError("یک مدل سازگار با ورودی عکس انتخاب کنید.")
     if not 0.05 <= float(strength) <= 0.95:
         raise RuntimeError("شدت ویرایش باید بین ۰٫۰۵ و ۰٫۹۵ باشد.")
     if not isinstance(image_data_url, str) or not image_data_url.startswith("data:image/") or "," not in image_data_url:
@@ -661,21 +691,49 @@ def edit_image(prompt, image_data_url, strength=0.65, aspect_ratio="1:1", tempor
             source = ImageOps.exif_transpose(opened).convert("RGB")
     except (OSError, ValueError, Image.DecompressionBombError) as error:
         raise RuntimeError("عکس ورودی قابل خواندن نیست.") from error
+    if active_kind == "sdcpp":
+        with tempfile.TemporaryDirectory(prefix="nocturne-edit-") as folder:
+            reference = Path(folder) / "reference.png"
+            source.save(reference)
+            return generate_sdcpp(prompt, aspect_ratio=aspect_ratio, temporary=temporary,
+                                  metadata={**(metadata or {}), "mode": "edit", "strength": strength}, reference=reference)
     translated, warning = translate_prompt(prompt.strip(), torch)
     if not translated:
         raise RuntimeError("توضیح ویرایش خالی است.")
-    try:
-        editor = AutoPipelineForImage2Image.from_pipe(pipe)
-    except Exception as error:
-        import inspect
-        if "image" not in inspect.signature(pipe.__call__).parameters:
-            raise RuntimeError(f"این مدل با موتور ویرایش فعلی قابل تبدیل نیست: {str(error)[:240]}") from error
+    original_parameters = inspect.signature(pipe.__call__).parameters
+    native_reference = "mask_image" in original_parameters or "control_image" in original_parameters or "flux2" in type(pipe).__name__.lower()
+    if native_reference:
         editor = pipe
+    else:
+        try:
+            editor = AutoPipelineForImage2Image.from_pipe(pipe)
+        except Exception as error:
+            if "image" not in original_parameters:
+                raise RuntimeError(f"این مدل با موتور ویرایش فعلی قابل تبدیل نیست: {str(error)[:240]}") from error
+            editor = pipe
     settings = image_settings(editor, active_model, aspect_ratio)
-    source = ImageOps.pad(source, (settings["width"], settings["height"]), color=(24, 24, 24))
-    import inspect
+    target_size = (settings.get("width", source.width), settings.get("height", source.height))
+    fitted = ImageOps.pad(source, target_size, color=(24, 24, 24))
     parameters = inspect.signature(editor.__call__).parameters
-    arguments = dict(prompt=translated, image=source, strength=float(strength), **settings)
+    arguments = dict(prompt=translated, strength=float(strength), **settings)
+    if "control_image" in parameters and "fluxcontrol" in type(editor).__name__.lower():
+        arguments["control_image"] = fitted
+    else:
+        arguments["image"] = fitted
+    if "mask_image" in parameters:
+        if not isinstance(mask_data_url, str) or "," not in mask_data_url:
+            raise RuntimeError("Attach a black-and-white mask in Edit. White marks the area to repaint.")
+        _, encoded = mask_data_url.split(",", 1)
+        if len(encoded) > 28 * 1024**2:
+            raise ValueError("Mask exceeds 20 MB.")
+        mask = base64.b64decode(encoded, validate=True)
+        if len(mask) > 20 * 1024**2:
+            raise ValueError("Mask exceeds 20 MB.")
+        with Image.open(io.BytesIO(mask)) as opened:
+            if opened.size != source.size:
+                raise ValueError("Mask dimensions must match the input image.")
+            arguments["mask_image"] = ImageOps.pad(opened.convert("L"), target_size,
+                                                   method=Image.Resampling.NEAREST, color=0)
     if not any(parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()):
         arguments = {key: value for key, value in arguments.items() if key in parameters}
     with torch.inference_mode(), contextlib.redirect_stdout(sys.stderr):
@@ -691,7 +749,7 @@ def edit_image(prompt, image_data_url, strength=0.65, aspect_ratio="1:1", tempor
             "translated": translated, "model": active_model, "temporary": temporary, "translation_warning": warning}
 
 
-def generate_sdcpp(prompt, translated_override=None, warning_override=False, include_image=True, aspect_ratio="1:1", temporary=False, metadata=None, filename=None):
+def generate_sdcpp(prompt, translated_override=None, warning_override=False, include_image=True, aspect_ratio="1:1", temporary=False, metadata=None, filename=None, reference=None):
     import torch
     manifest = sdcpp_models().get(active_model)
     if not manifest or active_kind != "sdcpp":
@@ -706,15 +764,22 @@ def generate_sdcpp(prompt, translated_override=None, warning_override=False, inc
     recipe = manifest["recipe"]
     turbo = recipe in ("qwen_encoder", "qwen_turbo_generic", "krea_complete", "krea_denoiser")
     width, height = aspect_dimensions(aspect_ratio, 1024)
-    flux = recipe in ("flux_schnell", "flux_dev")
+    flux = recipe in ("flux_schnell", "flux_dev", "flux_kontext")
+    flux2 = recipe.startswith("flux2")
+    if reference and recipe not in SDCPP_EDIT_RECIPES:
+        raise RuntimeError("مدل انتخاب‌شده ورودی عکس ندارد.")
+    if recipe == "flux_kontext" and reference is None:
+        raise RuntimeError("برای FLUX Kontext در حالت ویرایش یک تصویر مرجع انتخاب کنید.")
     encoders = (["--clip_l", weights["clip_l"], "--t5xxl", weights["t5xxl"]] if flux else
                 ["--llm", weights["llm"]])
-    steps = "4" if recipe == "flux_schnell" else "20" if recipe == "flux_dev" else "8" if turbo else "28"
+    steps = "4" if recipe == "flux_schnell" or recipe.startswith("flux2_klein") else "20" if recipe.startswith(("flux_dev", "flux2")) else "8" if turbo else "28"
     command = [manifest["engine"], "--diffusion-model", weights["diffusion"],
                *encoders, "--vae", weights["vae"],
                "-p", translated, "--steps", steps,
-               "--cfg-scale", "1.0" if flux or turbo else "6.0", "--sampling-method", "euler",
+               "--cfg-scale", "4.0" if recipe.startswith("flux2_base") else "1.0" if flux or flux2 or turbo else "6.0", "--sampling-method", "euler",
                "-W", str(width), "-H", str(height), "-o", str(staged)]
+    if reference:
+        command.extend(["-r", str(reference)])
     if flux:
         command.extend(["--clip-on-cpu", "--guidance", "0" if recipe == "flux_schnell" else "3.5"])
     if recipe in ("qwen_encoder", "qwen_turbo_generic"):
@@ -834,13 +899,9 @@ def batch_generate(topic, count, split_cpu=False, aspect_ratio="1:1", metadata=N
 
 
 @contextlib.contextmanager
-def lock_queue(run_id):
-    if not run_id:
-        yield
-        return
-    staging = OUTPUT_DIR / ".nocturne-pending"
-    staging.mkdir(parents=True, exist_ok=True)
-    with (staging / (run_id + ".lock")).open("a+b") as lock:
+def exclusive_file(path, conflict):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a+b") as lock:
         lock.seek(0)
         try:
             if os.name == "nt":
@@ -850,7 +911,18 @@ def lock_queue(run_id):
                 import fcntl
                 fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError as error:
-            raise RuntimeError("This queue is still running in another process. Try again shortly.") from error
+            raise RuntimeError(conflict) from error
+        yield
+
+
+
+@contextlib.contextmanager
+def lock_queue(run_id):
+    if not run_id:
+        yield
+        return
+    with exclusive_file(OUTPUT_DIR / ".nocturne-pending" / (run_id + ".lock"),
+                        "This queue is still running in another process. Try again shortly."):
         yield
 
 
@@ -1035,18 +1107,56 @@ def storage_info():
             "output_folder": str(OUTPUT_DIR)}
 
 
+def sdcpp_recipe(model_id, filenames):
+    known = SDCPP_RECIPES.get(model_id)
+    if known:
+        return known
+    title = model_id.lower().replace("_", "-")
+    weights = [Path(name).name.lower() for name in filenames if name.lower().endswith(".gguf")]
+    if not weights or "lora" in title:
+        return None
+    # Generic community recipes require the family on the repository and the model weight.
+    if "flux" in title and not re.search(r"(?:^|[.-])kv(?:$|[.-])", title):
+        descriptors = (
+            ("flux2_base_4b", r"flux[.-]?2.*klein.*base.*4b"),
+            ("flux2_base_9b", r"flux[.-]?2.*klein.*base.*9b"),
+            ("flux2_klein_4b", r"flux[.-]?2.*klein.*4b"),
+            ("flux2_klein_9b", r"flux[.-]?2.*klein.*9b"),
+            ("flux2_dev", r"flux[.-]?2.*dev"),
+            ("flux_kontext", r"flux[.-]?1.*kontext"),
+            ("flux_schnell", r"flux[.-]?1.*schnell"),
+            ("flux_dev", r"flux[.-]?1(?!.*(?:kontext|fill|canny|depth|redux)).*dev"),
+        )
+        for recipe, pattern in descriptors:
+            if re.search(pattern, title) and any(re.search(pattern, weight) for weight in weights):
+                return recipe
+    if "qwen-image-2.1" in title:
+        return "qwen_generic"
+    return None
+
+
 def search(query, kind="image", image_only=False):
     options = dict(search=query or None, full=True, sort="downloads", limit=800)
     if not query or image_only:
         options["pipeline_tag"] = "text-to-video" if kind == "video" else "text-to-image"
-    models = HfApi().list_models(**options)
+    api = HfApi()
+    models = {item.id: item for item in api.list_models(**options)}
+    normalized = re.sub(r"[-_\s]+", " ", query.strip().lower())
+    if kind == "image" and normalized in ("flux", "flux gguf", "flux.1 gguf", "flux.2", "uncensored",
+                                           "بدون سانسور", "flux uncensored"):
+        terms = (["uncensored", "abliterated", "uncensor", "nsfw"] if "uncensored" in normalized or normalized == "بدون سانسور"
+                 else ["FLUX.1", "FLUX.2", "FLUX Kontext", "FLUX klein"])
+        for term in terms:
+            for item in api.list_models(search=term, full=True, sort="downloads", limit=230):
+                if item.pipeline_tag in ("text-to-image", "image-to-image", "inpainting", None) and (
+                        not normalized.startswith("flux") or "flux" in item.id.lower()):
+                    models.setdefault(item.id, item)
     results = []
-    for m in models:
+    for m in models.values():
         names = {s.rfilename for s in (m.siblings or [])}
         tags = set(m.tags or [])
         is_lora = "lora" in tags or "lora" in m.id.lower()
-        if m.pipeline_tag == "text-to-image" and (m.id in SDCPP_RECIPES or
-              ("qwen-image-2.1" in m.id.lower() and not is_lora and any(name.lower().endswith(".gguf") for name in names))):
+        if kind == "image" and not is_lora and sdcpp_recipe(m.id, names):
             category = "sdcpp"
         elif any(name.lower().endswith(".gguf") for name in names):
             category = "gguf"
@@ -1095,8 +1205,41 @@ def download_bytes_left(size, target, part=None):
         return size
 
 
-def model_info(model_id):
-    revision = pinned_downloads().get(model_id)
+def describe_download_plan(plan, reserve=2 * 1024**3):
+    entries = []
+    for size, target, part in plan:
+        remaining = download_bytes_left(size, target, part) if isinstance(size, int) else None
+        parts = target.parts
+        if "snapshots" in parts:
+            name = "/".join(parts[parts.index("snapshots") + 2:])
+        elif "weights" in parts:
+            name = "/".join(parts[parts.index("weights") + 2:])
+        else:
+            name = target.name
+        entries.append({"name": name, "size": size, "remaining": remaining})
+    complete_sizes = bool(entries) and all(item["remaining"] is not None for item in entries)
+    base = MODEL_HOME.resolve()
+    probe = base
+    while not probe.exists() and probe.parent != probe:
+        probe = probe.parent
+    try:
+        free = shutil.disk_usage(probe).free
+    except OSError:
+        free = None
+    remaining = sum(item["remaining"] for item in entries) if complete_sizes else None
+    return {"file_plan": entries, "folder": str(base), "free_bytes": free,
+            "required_bytes": None if remaining is None else remaining + (reserve if remaining else 0)}
+
+
+def checked_revisions(revisions):
+    if not isinstance(revisions, dict) or any(not isinstance(value, str) or not re.fullmatch(r"[a-f0-9]{40}", value)
+                                              for value in revisions.values()):
+        raise ValueError("Invalid repository revision.")
+    return revisions
+
+
+def model_info(model_id, requested_kind=None, variant=None):
+    revision = download_pin(model_id)
     info = retry_call(lambda: HfApi().model_info(model_id, revision=revision, files_metadata=True, timeout=20),
                       "بررسی مدل", model_id, attempts=2)
     names = [s.rfilename for s in (info.siblings or [])]
@@ -1111,9 +1254,12 @@ def model_info(model_id):
     image_input = None
     plan = []
     requirements = []
-    if model_id in SDCPP_RECIPES or ("qwen-image-2.1" in model_id.lower() and has_gguf and not is_lora):
+    variants = []
+    revisions = {model_id: info.sha}
+    if requested_kind != "checkpoint" and not is_lora and sdcpp_recipe(model_id, names):
         try:
-            _, files = sdcpp_weight_plan(model_id)
+            recipe, files, variants = sdcpp_weight_plan(model_id, revisions, variant, initial_info=info)
+            revisions.update({file["repo"]: file["revision"] for file in files})
             engine_type = "cuda" if selected_device.startswith("cuda") else "cpu"
             engine_tag, assets = sdcpp_engine_assets(selected_device)
             engine_dir = SDCPP_ROOT / "engine" / engine_tag / engine_type
@@ -1123,14 +1269,12 @@ def model_info(model_id):
             if not ready and not (engine_dir / "sd-cli.exe").is_file():
                 plan.extend((asset["size"], engine_dir / asset["name"], None) for asset in assets)
             requirements = ["stable-diffusion.cpp", "CUDA 12" if engine_type == "cuda" else "CPU"]
-            image_input = False
+            image_input = recipe in SDCPP_EDIT_RECIPES
             download_kind = "sdcpp"
             compatibility, reason = "sdcpp", f"آمادهٔ نصب با موتور؛ {len(files)} فایل لازم بررسی شد"
-            if model_id in SDCPP_RECIPES and SDCPP_RECIPES[model_id].startswith("flux_"):
-                reason = "stable-diffusion.cpp · Q4 + CLIP-L + T5-XXL + VAE · حجم شامل همهٔ وابستگی‌هاست"
         except Exception as error:
             compatibility, reason = "review", f"فایل‌های لازم برای موتور کامل نیستند: {error}"
-    elif has_index or has_merged_index:
+    elif (has_index or has_merged_index) and requested_kind != "checkpoint":
         try:
             import diffusers
             index_name = "model_index.json" if has_index else "merged-model/model_index.json"
@@ -1138,7 +1282,7 @@ def model_info(model_id):
                                     cache_dir=MODEL_CACHE, etag_timeout=15), "بررسی ساختار مدل", model_id, attempts=2)
             config = json.loads(Path(index_file).read_text(encoding="utf-8"))
             class_name = config.get("_class_name", "")
-            image_input = class_name in ("StableDiffusionPipeline", "StableDiffusionXLPipeline", "FluxPipeline", "Flux2Pipeline", "QwenImagePipeline", "QwenImage21Pipeline") or "Img2Img" in class_name
+            image_input = class_name in ("StableDiffusionPipeline", "StableDiffusionXLPipeline", "FluxPipeline", "FluxKontextPipeline", "FluxFillPipeline", "FluxControlPipeline", "Flux2Pipeline", "Flux2KleinPipeline", "QwenImagePipeline", "QwenImage21Pipeline") or "Img2Img" in class_name
             kind = model_type(class_name)
             parts = [key for key, value in config.items() if not key.startswith("_") and
                      isinstance(value, list) and value and value[0] is not None]
@@ -1147,6 +1291,8 @@ def model_info(model_id):
             missing_parts = missing_pipeline_parts(names, config, "merged-model/" if has_merged_index and not has_index else "")
             if not hasattr(diffusers, class_name):
                 reason = f"کلاس {class_name or 'نامشخص'} در نسخهٔ فعلی Diffusers نصب نیست"
+            elif "prior" in class_name.lower():
+                reason = "این بستهٔ کمکی به یک مدل پایه و مسیر مخصوص ترکیب نیاز دارد"
             elif kind == "video" and class_name not in SUPPORTED_VIDEO_CLASSES:
                 reason = f"موتور ویدیویی {class_name} هنوز در برنامه پشتیبانی نمی‌شود"
             elif missing_parts or not has_weights:
@@ -1174,6 +1320,15 @@ def model_info(model_id):
                 download_kind = "checkpoint"
                 compatibility = "checkpoint"
                 reason = f"فایل کامل {checkpoint.rfilename} با موتور SD/SDXL قابل دریافت است"
+    elif model_id == FEATURED_LORA:
+        selected = next((file for file in info.siblings if file.rfilename.endswith(".safetensors")), None)
+        if selected and selected.lfs:
+            target = MODEL_CACHE / ("models--" + model_id.replace("/", "--")) / "snapshots" / info.sha / selected.rfilename
+            part = MODEL_CACHE / ".nocturne-parts" / model_id / info.sha / (selected.rfilename + ".part")
+            plan = [(selected.size, target, part)]
+            download_kind = "adapter"
+        requirements = ["Diffusers", "Qwen/Qwen-Image-2.1"]
+        compatibility, reason = "adapter", "LoRA نیازمند مدل پایه است"
     elif is_lora:
         compatibility, reason = "adapter", "LoRA است و برای اجرا به مدل پایهٔ سازگار نیاز دارد"
     elif has_gguf:
@@ -1184,6 +1339,8 @@ def model_info(model_id):
         compatibility, reason = "checkpoint", f"فایل کامل {checkpoint.rfilename} با موتور SD/SDXL قابل دریافت است"
     else:
         compatibility, reason = "review", "ساختار قابل اجرای مستقیمی برای موتورهای فعلی پیدا نشد"
+    if requested_kind == "checkpoint" and checkpoint_candidate(info):
+        download_kind, compatibility, reason = "checkpoint", "checkpoint", "SD/SDXL single-file checkpoint"
     if download_kind == "checkpoint":
         checkpoint = checkpoint_candidate(info)
         if checkpoint and checkpoint.lfs and checkpoint.lfs.sha256:
@@ -1198,6 +1355,7 @@ def model_info(model_id):
     if plan and all(type(count) is int and count >= 0 for count, _, _ in plan):
         download_bytes = sum(count for count, _, _ in plan)
         remaining_bytes = sum(download_bytes_left(count, target, part) for count, target, part in plan)
+    summary = describe_download_plan(plan, 2 * 1024**3 if download_kind != "checkpoint" else 1024**3)
     card = getattr(info, "card_data", None)
     params = getattr(card, "num_parameters", None) if card else None
     if not isinstance(params, (int, float)):
@@ -1208,6 +1366,7 @@ def model_info(model_id):
             "checkpoint_available": checkpoint_candidate(info) is not None,
             "image_input": image_input, "download_bytes": download_bytes,
             "remaining_bytes": remaining_bytes, "requirements": requirements,
+            "variants": variants, "revisions": revisions, **summary,
             "memory_gib": ([round(download_bytes / 1024**3 + overhead, 1) for overhead in (2, 8)]
                            if download_bytes and download_kind in ("image", "checkpoint", "sdcpp") else None),
             "reason": reason}
@@ -1248,11 +1407,23 @@ def pinned_downloads():
         return {}
 
 
-def save_pinned_downloads(pins):
-    MODEL_CACHE.mkdir(parents=True, exist_ok=True)
-    path = MODEL_CACHE / ".nocturne-downloads.json"
+def download_pin_path(model_id):
+    key = hashlib.sha256(model_id.casefold().encode()).hexdigest()
+    return MODEL_CACHE / ".nocturne-pins" / key
+
+
+def download_pin(model_id):
+    path = download_pin_path(model_id)
+    if path.is_file():
+        return path.read_text(encoding="ascii").strip() or None
+    return pinned_downloads().get(model_id)
+
+
+def save_download_pin(model_id, revision):
+    path = download_pin_path(model_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(".tmp")
-    temporary.write_text(json.dumps(pins), encoding="utf-8")
+    temporary.write_text(revision or "", encoding="ascii")
     temporary.replace(path)
 
 
@@ -1261,7 +1432,7 @@ def permanent_download_error(error):
     if status in (401, 403, 404, 416):
         return True
     message = str(error).lower()
-    return any(word in message for word in ("gated", "not found", "permission denied", "no space", "صحت فایل", "نپذیرفت"))
+    return any(word in message for word in ("gated", "not found", "permission denied", "no space", "صحت فایل", "hash mismatch", "نپذیرفت"))
 
 
 def retry_call(operation, label, model_id, attempts=6):
@@ -1276,48 +1447,82 @@ def retry_call(operation, label, model_id, attempts=6):
             time.sleep(min(3 * attempt, 15))
 
 
-def download_resumable(url, part_path, destination, expected_size, expected_sha, progress):
+def file_sha256(path):
+    with path.open("rb") as source:
+        return hashlib.file_digest(source, "sha256").hexdigest()
+
+
+def valid_download(path, size, digest=None):
+    try:
+        return path.is_file() and path.stat().st_size == size and (not digest or file_sha256(path) == digest.lower())
+    except OSError:
+        return False
+
+
+def download_resumable(url, part_path, destination, expected_size, expected_sha, progress, notify=None):
     part_path.parent.mkdir(parents=True, exist_ok=True)
     offset = part_path.stat().st_size if part_path.exists() else 0
     if offset > expected_size:
-        raise RuntimeError(f"فایل نیمه‌دانلودشده از اندازهٔ اصلی بزرگ‌تر است: {part_path}")
+        part_path.unlink()
+        offset = 0
+        if notify:
+            notify("restarting")
     if offset < expected_size:
-        headers = {"Range": f"bytes={offset}-"} if offset else {}
-        token = get_token()
-        if token:
-            headers["Authorization"] = f"Bearer {token}"
-        with requests.get(url, headers=headers, stream=True, timeout=(20, 45)) as response:
+        headers = {"Accept-Encoding": "identity"}
+        if offset:
+            headers["Range"] = f"bytes={offset}-"
+        if urlsplit(url).hostname == "huggingface.co":
+            token = get_token()
+            if token:
+                headers["Authorization"] = f"Bearer {token}"
+        with requests.get(url, headers=headers, stream=True, timeout=(15, 35)) as response:
+            response.raise_for_status()
+            mode = "ab"
             if offset:
                 content_range = response.headers.get("Content-Range", "")
-                if response.status_code != 206 or not content_range.startswith(f"bytes {offset}-"):
-                    raise RuntimeError("سرور ادامهٔ فایل را از نقطهٔ ذخیره‌شده نپذیرفت؛ بخش قبلی حفظ شد.")
-            response.raise_for_status()
-            with part_path.open("ab", buffering=0) as output:
-                for chunk in response.iter_content(chunk_size=1024 * 1024):
-                    if chunk:
-                        output.write(chunk)
-                        offset += len(chunk)
-                        if offset > expected_size:
-                            raise RuntimeError("دادهٔ دریافتی از اندازهٔ اعلام‌شده بزرگ‌تر شد.")
-                        progress(offset, len(chunk))
+                if response.status_code == 200:
+                    content_length = response.headers.get("Content-Length")
+                    if content_length and content_length != str(expected_size):
+                        raise RuntimeError("The server returned a file with an unexpected size.")
+                    offset, mode = 0, "wb"
+                    if notify:
+                        notify("restarting")
+                elif response.status_code != 206 or not re.fullmatch(rf"bytes {offset}-\d+/{expected_size}", content_range):
+                    raise RuntimeError("The server returned an invalid range; the partial file was kept.")
+            elif response.status_code != 200:
+                raise RuntimeError("Unexpected response for the start of a file.")
+            rate = getattr(TRANSFER_LIMIT, "bytes_per_sec", 0)
+            transferred, started = 0, time.monotonic()
+            with part_path.open(mode, buffering=0) as output:
+                for chunk in response.iter_content(chunk_size=256 * 1024):
+                    if not chunk:
+                        continue
+                    if offset + len(chunk) > expected_size:
+                        raise RuntimeError("The server returned more data than expected.")
+                    output.write(chunk)
+                    offset += len(chunk)
+                    transferred += len(chunk)
+                    if rate:
+                        time.sleep(max(0, transferred / rate - (time.monotonic() - started)))
+                    progress(offset, len(chunk))
     if offset != expected_size:
-        raise RuntimeError(f"فایل هنوز کامل نیست: {offset} از {expected_size} بایت")
-    digest = hashlib.sha256()
-    with part_path.open("rb") as source:
-        for chunk in iter(lambda: source.read(8 * 1024 * 1024), b""):
-            digest.update(chunk)
-    if digest.hexdigest().lower() != expected_sha.lower():
-        raise RuntimeError("بررسی صحت فایل ناموفق بود؛ فایل نیمه‌دانلودشده حفظ شد.")
+        raise RuntimeError(f"Connection interrupted: {offset} of {expected_size} bytes.")
+    if notify:
+        notify("verifying")
+    if file_sha256(part_path) != expected_sha.lower():
+        # Keep other files. The next retry starts only this damaged file again.
+        part_path.unlink()
+        raise RuntimeError("File hash mismatch; retry to download this file again.")
     destination.parent.mkdir(parents=True, exist_ok=True)
     part_path.replace(destination)
 
 
-def download_featured_lora(model_id):
+def download_featured_lora(model_id, revision=None):
     if model_id != FEATURED_LORA:
         raise RuntimeError("دانلود این LoRA هنوز در برنامه پشتیبانی نمی‌شود.")
     emit_progress({"model_id": model_id, "phase": "checking", "processed": 0, "received": 0, "total": 0, "speed": 0})
     api = HfApi()
-    info = retry_call(lambda: api.model_info(model_id, files_metadata=True, timeout=30), "بررسی LoRA", model_id)
+    info = retry_call(lambda: api.model_info(model_id, revision=revision, files_metadata=True, timeout=30), "بررسی LoRA", model_id)
     weight_name = "chatrlabs-omni-lora-v0.1-bf16.safetensors"
     siblings = {s.rfilename: s for s in info.siblings}
     weight = siblings.get(weight_name)
@@ -1364,40 +1569,55 @@ def download_featured_lora(model_id):
     return {"id": model_id, "kind": "adapter", "base_model": "Qwen/Qwen-Image-2.1"}
 
 
-def sdcpp_weight_plan(model_id):
-    recipe = SDCPP_RECIPES.get(model_id)
-    if not recipe and "qwen-image-2.1" in model_id.lower():
-        recipe = "qwen_generic"
-    if not recipe:
-        raise RuntimeError("برای این مخزن هنوز ترکیب فایل‌های اجرایی مشخص نیست.")
+def sdcpp_weight_plan(model_id, revisions=None, variant=None, initial_info=None):
+    revisions = checked_revisions(revisions or {})
     api = HfApi()
     cache = {}
-    def choose(role, repo_id, filename):
+    if initial_info is not None:
+        cache[model_id] = initial_info
+    def repository(repo_id):
         if repo_id not in cache:
-            cache[repo_id] = retry_call(lambda: api.model_info(repo_id, files_metadata=True, timeout=30),
+            cache[repo_id] = retry_call(lambda: api.model_info(repo_id, revision=revisions.get(repo_id), files_metadata=True, timeout=30),
                                         "بررسی فایل‌های مدل", model_id)
-        info = cache[repo_id]
+        return cache[repo_id]
+    source = repository(model_id)
+    recipe = sdcpp_recipe(model_id, (file.rfilename for file in source.siblings))
+    if not recipe:
+        raise RuntimeError("برای این مخزن هنوز ترکیب فایل‌های اجرایی مشخص نیست.")
+    variants = []
+    def choose(role, repo_id, filename):
+        info = repository(repo_id)
         sibling = next((s for s in info.siblings if s.rfilename == filename), None)
         if not sibling or not sibling.size or not sibling.lfs or not sibling.lfs.sha256:
             raise RuntimeError(f"فایل لازم در مخزن پیدا نشد: {repo_id}/{filename}")
         return {"role": role, "repo": repo_id, "name": filename, "revision": info.sha,
                 "size": sibling.size, "sha": sibling.lfs.sha256}
     comfy_qwen = "Comfy-Org/Qwen-Image-2.1"
-    if recipe in ("flux_schnell", "flux_dev"):
-        info = retry_call(lambda: api.model_info(model_id, files_metadata=True, timeout=30),
-                          "بررسی فایل‌های FLUX", model_id)
-        cache[model_id] = info
-        filenames = {item.rfilename for item in info.siblings}
-        preferred = ["Q4_K_S", "Q4_K_M", "q4_k", "q4_0"]
-        candidates = sorted(name for name in filenames if name.lower().endswith(".gguf"))
-        denoiser = next((name for quant in preferred for name in candidates
-                        if name.lower().endswith("-" + quant.lower() + ".gguf")), None)
-        if not denoiser:
-            raise RuntimeError("نسخهٔ Q4 سازگار FLUX در این مخزن پیدا نشد.")
-        files = [choose("diffusion", model_id, denoiser),
-                 choose("clip_l", "comfyanonymous/flux_text_encoders", "clip_l.safetensors"),
-                 choose("t5xxl", "comfyanonymous/flux_text_encoders", "t5xxl_fp16.safetensors"),
-                 choose("vae", "cocktailpeanut/xulf-dev", "ae.safetensors")]
+    if recipe.startswith("flux"):
+        folders = ("clip", "t5", "vae", "mmproj", "lora", "qwen", "mistral", "encoder")
+        candidates = [file for file in source.siblings if file.rfilename.lower().endswith(".gguf")
+                      and not any(word in file.rfilename.lower() for word in folders) and file.size and file.lfs]
+        preferred = ("q4_k_s", "q4_k_m", "q4_k", "q4_0", "q5_k_m", "q8_0")
+        candidates.sort(key=lambda file: (next((index for index, tag in enumerate(preferred)
+                            if file.rfilename.lower().endswith("-"+tag+".gguf")), len(preferred)), file.size))
+        variants = [{"name": file.rfilename, "size": file.size} for file in candidates]
+        selected = next((file for file in candidates if file.rfilename == variant), None) if variant else next(iter(candidates), None)
+        if not selected:
+            raise RuntimeError("فایل GGUF انتخاب‌شده برای FLUX پیدا نشد.")
+        files = [choose("diffusion", model_id, selected.rfilename)]
+        if recipe.startswith("flux2"):
+            files.append(choose("vae", "Comfy-Org/flux2-klein-4B", "split_files/vae/flux2-vae.safetensors"))
+            if recipe == "flux2_dev":
+                files.append(choose("llm", "unsloth/Mistral-Small-3.2-24B-Instruct-2506-GGUF",
+                                    "Mistral-Small-3.2-24B-Instruct-2506-Q4_K_M.gguf"))
+            else:
+                size = "4b" if recipe.endswith("4b") else "8b"
+                files.append(choose("llm", "Comfy-Org/flux2-klein-4B" if size == "4b" else "Comfy-Org/flux2-klein-9B",
+                                    f"split_files/text_encoders/qwen_3_{size}.safetensors"))
+        else:
+            files.extend([choose("clip_l", "comfyanonymous/flux_text_encoders", "clip_l.safetensors"),
+                          choose("t5xxl", "comfyanonymous/flux_text_encoders", "t5xxl_fp16.safetensors"),
+                          choose("vae", "cocktailpeanut/xulf-dev", "ae.safetensors")])
     elif recipe == "qwen_encoder":
         name = "Qwen-Image-2.1-Turbo-Uncensored-AD-Q4_K.gguf" if model_id.startswith("AtomicChat/") else "Qwen-Image-2.1-Turbo-Abliterated-Uncensored-AD-Q4_K.gguf"
         files = [choose("llm", model_id, name),
@@ -1443,7 +1663,7 @@ def sdcpp_weight_plan(model_id):
         files = [choose("diffusion", model_id, "KreaNoct_V4_int8_convrot.safetensors"),
                  choose("llm", comfy_krea, "text_encoders/qwen3vl_4b_fp8_scaled.safetensors"),
                  choose("vae", comfy_krea, "vae/qwen_image_vae.safetensors")]
-    return recipe, files
+    return recipe, files, variants
 
 
 def sdcpp_engine_assets(device):
@@ -1491,8 +1711,8 @@ def safe_extract_zip(archive, target):
         package.extractall(target)
 
 
-def install_sdcpp(model_id):
-    recipe, files = sdcpp_weight_plan(model_id)
+def install_sdcpp(model_id, revisions=None, variant=None, repair=False):
+    recipe, files, _ = sdcpp_weight_plan(model_id, revisions, variant)
     engine_type = "cuda" if selected_device.startswith("cuda") else "cpu"
     existing = sorted((path for path in (SDCPP_ROOT / "engine").glob(f"*/{engine_type}/sd-cli.exe")
                        if (path.parent / ".ready").is_file()), reverse=True)
@@ -1514,10 +1734,14 @@ def install_sdcpp(model_id):
                   "size": file["size"], "sha": file["sha"],
                   "destination": sdcpp_file_path(model_id, file)} for file in files)
     total = sum(task["size"] for task in tasks)
+    if repair:
+        emit_progress({"model_id": model_id, "phase": "verifying"})
+    for task in tasks:
+        task["done"] = valid_download(task["destination"], task["size"], task["sha"] if repair else None)
     def current_size(task):
         destination = task["destination"]
         part = Path(str(destination) + ".part")
-        if destination.is_file() and destination.stat().st_size == task["size"]:
+        if task["done"]:
             return task["size"]
         return min(part.stat().st_size, task["size"]) if part.is_file() else 0
     saved = sum(current_size(task) for task in tasks)
@@ -1526,15 +1750,14 @@ def install_sdcpp(model_id):
     started = time.monotonic()
     received = 0
     last_emit = 0.0
-    completed = 0
     def report(task, position, amount=0, phase="transferring", attempt=1):
         nonlocal received, last_emit
         received += amount
         now = time.monotonic()
-        if now - last_emit >= .4 or phase != "transferring" or completed + position == total:
+        if now - last_emit >= .4 or phase != "transferring" or position == task["size"]:
             last_emit = now
             emit_progress({"model_id": model_id, "phase": phase, "file": task["name"],
-                           "processed": completed + position, "received": received,
+                           "processed": position + sum(current_size(other) for other in tasks if other is not task), "received": received,
                            "total": total, "speed": received / max(now - started, .001), "attempt": attempt})
     for task in tasks:
         destination = task["destination"]
@@ -1542,24 +1765,37 @@ def install_sdcpp(model_id):
         part = Path(str(destination) + ".part")
         size = current_size(task)
         report(task, size, phase="resuming" if size else "starting")
-        if size < task["size"]:
+        if not task["done"]:
             for attempt in range(1, 13):
                 try:
                     download_resumable(task["url"], part, destination, task["size"], task["sha"],
-                                       lambda position, amount: report(task, position, amount, attempt=attempt))
+                                       lambda position, amount: report(task, position, amount, attempt=attempt),
+                                       lambda phase: report(task, current_size(task), phase=phase, attempt=attempt))
                     break
                 except Exception as error:
                     if attempt == 12 or permanent_download_error(error):
                         raise RuntimeError(f"دانلود {task['name']} متوقف شد؛ بخش دریافت‌شده حفظ شد: {error}") from error
                     report(task, current_size(task), phase="retrying", attempt=attempt + 1)
                     time.sleep(min(3 * attempt, 20))
-        completed += task["size"]
+        task["done"] = True
         report(task, task["size"])
-    if not engine_exe.is_file():
+    if assets:
+        emit_progress({"model_id": model_id, "phase": "installing", "processed": total, "total": total})
         for asset in assets:
             safe_extract_zip(engine_dir / asset["name"], engine_dir)
     if not engine_exe.is_file():
         raise RuntimeError("فایل sd-cli.exe پس از نصب موتور پیدا نشد.")
+    if assets or repair:
+        try:
+            test = subprocess.run([str(engine_exe), "--help"], cwd=engine_dir, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                  timeout=30, creationflags=0x08000000 if os.name == "nt" else 0)
+            if b"--diffusion-model" not in test.stdout:
+                raise RuntimeError("The engine could not start or its executable is incomplete.")
+        except (OSError, subprocess.TimeoutExpired, RuntimeError) as error:
+            (engine_dir / ".ready").unlink(missing_ok=True)
+            # A failed executable must be fetched/extracted again; weights remain cached.
+            engine_exe.unlink(missing_ok=True)
+            raise RuntimeError(f"Engine installation failed: {error}") from error
     (engine_dir / ".ready").write_text("verified", encoding="utf-8")
     for asset in assets:
         (engine_dir / asset["name"]).unlink(missing_ok=True)
@@ -1568,14 +1804,16 @@ def install_sdcpp(model_id):
                 "sizes": {f["role"]: f["size"] for f in files}}
     manifest_dir = SDCPP_ROOT / "models" / model_id.replace("/", "--")
     manifest_dir.mkdir(parents=True, exist_ok=True)
-    (manifest_dir / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False), encoding="utf-8")
+    pending_manifest = manifest_dir / "manifest.part"
+    pending_manifest.write_text(json.dumps(manifest, ensure_ascii=False), encoding="utf-8")
+    pending_manifest.replace(manifest_dir / "manifest.json")
     emit_progress({"model_id": model_id, "phase": "complete", "processed": total,
                    "received": received, "total": total, "speed": received / max(time.monotonic()-started,.001)})
     return {"id": model_id, "kind": "sdcpp", "size_gb": round(total / 1024**3, 1)}
 
 
-def download_checkpoint(model_id):
-    info = retry_call(lambda: HfApi().model_info(model_id, files_metadata=True, timeout=30),
+def download_checkpoint(model_id, revision=None, repair=False):
+    info = retry_call(lambda: HfApi().model_info(model_id, revision=revision, files_metadata=True, timeout=30),
                       "بررسی فایل تک‌فایل", model_id, attempts=3)
     sibling = checkpoint_candidate(info)
     if not sibling or not sibling.size or not sibling.lfs or not sibling.lfs.sha256:
@@ -1600,11 +1838,14 @@ def download_checkpoint(model_id):
                        "speed": received / max(time.monotonic() - started, .001)})
     emit_progress({"model_id": model_id, "phase": "starting", "file": sibling.rfilename,
                    "processed": min(saved, sibling.size), "received": 0, "total": sibling.size, "speed": 0})
-    if not destination.is_file() or destination.stat().st_size != sibling.size:
+    if repair:
+        emit_progress({"model_id": model_id, "phase": "verifying", "file": sibling.rfilename})
+    if not valid_download(destination, sibling.size, sibling.lfs.sha256 if repair else None):
         for attempt in range(1, 13):
             try:
                 download_resumable(hf_hub_url(model_id, sibling.rfilename, revision=info.sha), part,
-                                   destination, sibling.size, sibling.lfs.sha256, report)
+                                   destination, sibling.size, sibling.lfs.sha256, report,
+                                   lambda phase: emit_progress({"model_id": model_id, "phase": phase, "file": sibling.rfilename}))
                 break
             except Exception as error:
                 if attempt == 12 or permanent_download_error(error):
@@ -1620,18 +1861,18 @@ def download_checkpoint(model_id):
     return {"id": model_id, "kind": "checkpoint", "size_gb": round(sibling.size / 1024**3, 2)}
 
 
-def download(model_id, kind="image"):
+def download(model_id, kind="image", revisions=None, variant=None, repair=False):
+    revisions = checked_revisions(revisions or {})
     if kind == "adapter":
-        return download_featured_lora(model_id)
+        return download_featured_lora(model_id, revisions.get(model_id))
     if kind == "sdcpp":
-        return install_sdcpp(model_id)
+        return install_sdcpp(model_id, revisions, variant, repair)
     if kind == "checkpoint":
-        return download_checkpoint(model_id)
+        return download_checkpoint(model_id, revisions.get(model_id), repair)
     import diffusers
     emit_progress({"model_id": model_id, "phase": "checking", "processed": 0, "received": 0, "total": 0, "speed": 0})
     api = HfApi()
-    pins = pinned_downloads()
-    revision = pins.get(model_id)
+    revision = revisions.get(model_id) or download_pin(model_id)
     info = retry_call(lambda: api.model_info(model_id, revision=revision, files_metadata=True, timeout=30), "بررسی مخزن", model_id)
     names = {s.rfilename for s in info.siblings}
     index_name = "model_index.json" if "model_index.json" in names else "merged-model/model_index.json"
@@ -1641,8 +1882,8 @@ def download(model_id, kind="image"):
                             cache_dir=MODEL_CACHE, etag_timeout=30), "دریافت مشخصات مدل", model_id)
     config = json.loads(Path(index_file).read_text(encoding="utf-8"))
     class_name = config.get("_class_name", "")
-    if not hasattr(diffusers, class_name):
-        raise RuntimeError("این مدل با نسخهٔ فعلی Diffusers سازگار نیست.")
+    if not hasattr(diffusers, class_name) or "prior" in class_name.lower():
+        raise RuntimeError("این مدل با موتور مستقل فعلی سازگار نیست.")
     is_video = model_type(class_name) == "video"
     if (kind == "video") != is_video:
         raise RuntimeError("نوع این مدل با بخش انتخاب‌شده سازگار نیست.")
@@ -1660,9 +1901,17 @@ def download(model_id, kind="image"):
     snapshot_folder = Path(index_file).parent.parent if prefix else Path(index_file).parent
     part_root = MODEL_CACHE / ".nocturne-parts" / model_id / info.sha
 
+    damaged = set()
+    if repair:
+        emit_progress({"model_id": model_id, "phase": "verifying"})
+        for name in selected_files:
+            sibling = siblings[name]
+            digest = sibling.lfs.sha256 if sibling.lfs else None
+            if sizes[name] and not valid_download(snapshot_folder / name, sizes[name], digest):
+                damaged.add(name)
+
     def completed(name):
-        target = snapshot_folder / name
-        return target.is_file() and target.stat().st_size == sizes[name]
+        return name not in damaged and valid_download(snapshot_folder / name, sizes[name])
 
     def part_size(name):
         part = part_root / (name + ".part")
@@ -1674,8 +1923,7 @@ def download(model_id, kind="image"):
     missing_size = max(0, total - saved_bytes())
     if missing_size and shutil.disk_usage(snapshot_folder).free < missing_size + 2 * 1024**3:
         raise RuntimeError(f"فضای کافی نیست. برای فایل‌های باقی‌مانده حدود {missing_size / 1024**3:.1f} گیگابایت نیاز است.")
-    pins[model_id] = info.sha
-    save_pinned_downloads(pins)
+    save_download_pin(model_id, info.sha)
     started = time.monotonic()
     state = {"received": 0, "last_emit": 0.0, "file": ""}
 
@@ -1695,7 +1943,7 @@ def download(model_id, kind="image"):
             report(force=True)
             continue
         sibling = siblings[name]
-        if sizes[name] >= 64 * 1024 * 1024 and sibling.lfs and sibling.lfs.sha256:
+        if sizes[name] and sibling.lfs and sibling.lfs.sha256:
             destination = snapshot_folder / name
             part_path = part_root / (name + ".part")
             url = hf_hub_url(model_id, name, revision=info.sha)
@@ -1704,7 +1952,9 @@ def download(model_id, kind="image"):
                     def on_chunk(position, amount):
                         state["received"] += amount
                         report(attempt=attempt)
-                    download_resumable(url, part_path, destination, sizes[name], sibling.lfs.sha256, on_chunk)
+                    download_resumable(url, part_path, destination, sizes[name], sibling.lfs.sha256, on_chunk,
+                                       lambda phase: report(phase, True, attempt))
+                    damaged.discard(name)
                     break
                 except Exception as error:
                     if attempt == 12 or permanent_download_error(error):
@@ -1713,13 +1963,14 @@ def download(model_id, kind="image"):
                     time.sleep(min(3 * attempt, 20))
         else:
             retry_call(lambda: hf_hub_download(model_id, name, revision=info.sha,
-                       cache_dir=MODEL_CACHE, etag_timeout=30), f"دانلود {name}", model_id)
+                       cache_dir=MODEL_CACHE, etag_timeout=30,
+                       force_download=bool(sizes[name]) and (snapshot_folder / name).exists()), f"دانلود {name}", model_id)
+            damaged.discard(name)
         report(force=True)
-    if model_id not in complete_models(kind):
+    report("verifying", True)
+    if any(sizes[name] and not completed(name) for name in selected_files) or model_id not in complete_models(kind):
         raise RuntimeError("دانلود تمام شد ولی فایل‌های لازم برای اجرا کامل نیستند.")
-    pins = pinned_downloads()
-    pins.pop(model_id, None)
-    save_pinned_downloads(pins)
+    save_download_pin(model_id, None)
     report("complete", True)
     return {"id": model_id, "size_gb": round(total / 1024**3, 1)}
 
@@ -1764,7 +2015,21 @@ def tts_info(model_id):
                                                      cache_dir=MODEL_CACHE)).read_text(encoding="utf-8"))
             engine = "VITS" if config.get("model_type") == "vits" else None
             reason = "قابل نصب با موتور VITS" if engine else "این مدل موتور دیگری لازم دارد"
-    return {"engine": engine, "reason": reason, "size_gb": round(size / 1024**3, 2)}
+    files = []
+    if engine:
+        names = {"config.json", "vocab.json", "tokenizer_config.json", "model.safetensors", "special_tokens_map.json"}
+        selected = [file for file in info.siblings if
+                    (file.rfilename.endswith((".json", ".txt", ".safetensors")) if engine == "Qwen3-TTS" else file.rfilename in names)]
+        snapshot = MODEL_CACHE / ("models--" + model_id.replace("/", "--")) / "snapshots" / info.sha
+        parts = MODEL_CACHE / ".nocturne-parts" / model_id / info.sha
+        files = [(file.size, snapshot / file.rfilename, parts / (file.rfilename + ".part")) for file in selected]
+    complete_sizes = files and all(isinstance(size, int) for size, _, _ in files)
+    return {"engine": engine, "reason": reason, "size_gb": round(size / 1024**3, 2),
+            "download_kind": "voice" if engine else None, "gated": bool(info.gated and not get_token()),
+            "requirements": [engine] if engine else [], "revisions": {model_id: info.sha},
+            "download_bytes": sum(size for size, _, _ in files) if complete_sizes else None,
+            "remaining_bytes": sum(download_bytes_left(*file) for file in files) if complete_sizes else None,
+            **describe_download_plan(files)}
 
 
 QWEN_TTS_MODELS = ("Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice", "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice")
@@ -1791,10 +2056,10 @@ def tts_paths():
     return result
 
 
-def tts_download(model_id):
+def tts_download(model_id, revision=None):
     if model_id in QWEN_TTS_MODELS:
-        return qwen_tts_download(model_id)
-    info = retry_call(lambda: HfApi().model_info(model_id, files_metadata=True, timeout=20),
+        return qwen_tts_download(model_id, revision)
+    info = retry_call(lambda: HfApi().model_info(model_id, revision=revision, files_metadata=True, timeout=20),
                       "بررسی مدل صدا", model_id, attempts=3)
     files = {s.rfilename: s for s in info.siblings or []}
     config_path = hf_hub_download(model_id, "config.json", revision=info.sha, cache_dir=MODEL_CACHE)
@@ -1844,15 +2109,20 @@ def tts_download(model_id):
     return {"id": model_id}
 
 
-def qwen_tts_download(model_id):
-    info = retry_call(lambda: HfApi().model_info(model_id, files_metadata=True, timeout=30),
+def qwen_tts_download(model_id, revision=None):
+    info = retry_call(lambda: HfApi().model_info(model_id, revision=revision, files_metadata=True, timeout=30),
                       "بررسی مدل Qwen3-TTS", model_id, attempts=3)
     selected = [s for s in info.siblings if s.rfilename.endswith((".json", ".txt", ".safetensors"))]
     total = sum(s.size or 0 for s in selected)
     MODEL_CACHE.mkdir(parents=True, exist_ok=True)
-    if shutil.disk_usage(MODEL_CACHE).free < total + 2 * 1024**3:
+    snapshot = MODEL_CACHE / ("models--" + model_id.replace("/", "--")) / "snapshots" / info.sha
+    parts = MODEL_CACHE / ".nocturne-parts" / model_id / info.sha
+    remaining = sum(download_bytes_left(file.size or 0, snapshot / file.rfilename, parts / (file.rfilename + ".part"))
+                    for file in selected)
+    if remaining and shutil.disk_usage(MODEL_CACHE).free < remaining + 2 * 1024**3:
         raise RuntimeError(f"برای مدل Qwen3-TTS حدود {total / 1024**3:.1f} گیگابایت و فضای کاری بیشتر لازم است.")
     base = None
+    received, done, started = 0, 0, time.monotonic()
     for sibling in selected:
         name = sibling.rfilename
         if name.endswith(".safetensors"):
@@ -1866,18 +2136,24 @@ def qwen_tts_download(model_id):
             if not destination.is_file() or destination.stat().st_size != sibling.size:
                 for attempt in range(1, 13):
                     try:
+                        def report(position, amount):
+                            nonlocal received
+                            received += amount
+                            emit_progress({"model_id": model_id, "phase": "transferring", "file": name,
+                                           "processed": done + position, "received": received, "total": total,
+                                           "speed": received / max(.001, time.monotonic() - started)})
                         download_resumable(hf_hub_url(model_id, name, revision=info.sha), part,
-                                           destination, sibling.size, sibling.lfs.sha256,
-                                           lambda position, amount, file=name: emit_progress({"model_id": model_id,
-                                               "phase": "transferring", "file": file, "processed": position,
-                                               "received": amount, "total": sibling.size, "speed": 0}))
+                                           destination, sibling.size, sibling.lfs.sha256, report,
+                                           lambda phase: emit_progress({"model_id": model_id, "phase": phase, "file": name}))
                         break
                     except Exception as error:
                         if attempt == 12 or permanent_download_error(error):
                             raise RuntimeError(f"دانلود {name} متوقف شد؛ بخش دریافت‌شده حفظ شد: {error}") from error
+                        emit_progress({"model_id": model_id, "phase": "retrying", "file": name, "attempt": attempt + 1})
                         time.sleep(min(attempt * 3, 20))
         else:
             hf_hub_download(model_id, name, revision=info.sha, cache_dir=MODEL_CACHE)
+        done += sibling.size or 0
     emit_progress({"model_id": model_id, "phase": "complete", "processed": total,
                    "received": 0, "total": total, "speed": 0})
     return {"id": model_id}
@@ -2429,11 +2705,104 @@ def web_public_stop():
     return web_status()
 
 
+def chat_download_plan(payload):
+    import chat_engine
+    repo, filename = payload.get("repo"), payload.get("filename")
+    if not isinstance(repo, str) or not isinstance(filename, str):
+        return {"requirements": ["Ollama"], "folder": None, "download_bytes": payload.get("size"),
+                "reason": "Ollama resolves and stores its own files. Disk use is reported by the engine."}
+    info = chat_engine.hf_variants(repo, payload.get("revision"))
+    chosen = next((item for item in info["variants"] if filename in item["filenames"]), None)
+    if not chosen:
+        raise ValueError("The selected GGUF variant was not found.")
+    source = HfApi().model_info(repo, revision=info["revision"], files_metadata=True, timeout=20)
+    sizes = {item.rfilename: item for item in source.siblings}
+    cache = MODEL_CACHE / ("models--" + repo.replace("/", "--"))
+    files = []
+    for name in chosen["filenames"]:
+        item = sizes[name]
+        part = cache / "blobs" / (item.lfs.sha256 + ".incomplete") if item.lfs and item.lfs.sha256 else None
+        files.append((item.size, cache / "snapshots" / info["revision"] / name, part))
+    known = all(isinstance(size, int) for size, _, _ in files)
+    return {"requirements": [payload.get("engine") or "llama.cpp"], "gated": bool(info["gated"] and not get_token()),
+            "download_bytes": chosen["size"], "remaining_bytes": sum(download_bytes_left(*file) for file in files) if known else None,
+            "reason": "Engine prerequisites may be installed separately.", **describe_download_plan(files)}
+
+
+def model_folder_matches(payload):
+    folder = payload.get("folder")
+    if folder and Path(folder).resolve() != MODEL_HOME.resolve():
+        raise ValueError("Select the original model folder to resume this download.")
+
+
+def partial_model_files(payload):
+    from huggingface_hub.utils import validate_repo_id
+    model_id = payload["model_id"]
+    validate_repo_id(model_id)
+    revisions = checked_revisions(payload.get("revisions") or {})
+    revision = revisions.get(model_id) or download_pin(model_id)
+    kind = payload.get("kind")
+    if kind == "checkpoint":
+        base = CHECKPOINT_ROOT / model_id.replace("/", "--")
+    elif kind in ("image", "video", "adapter", "voice") and revision:
+        base = MODEL_CACHE / ".nocturne-parts" / model_id / revision
+    else:
+        return []
+    root = MODEL_HOME.resolve()
+    expected = base.resolve()
+    if root not in expected.parents:
+        return []
+    return [path for path in base.rglob("*.part") if path.is_file() and not path.is_symlink()
+            and path.resolve() == expected / path.relative_to(base)]
+
+
+def download_lock(payload, action="download"):
+    kind = payload.get("kind")
+    group = "engine:" + ("sdcpp" if kind == "sdcpp" else "chat") if kind in ("sdcpp", "chat") or action == "chat_pull" else ""
+    if action == "chat_pull":
+        group = "engine:chat"
+    key = group or str(payload["model_id"]).casefold()
+    name = hashlib.sha256(key.encode()).hexdigest() + ".lock"
+    return exclusive_file(MODEL_HOME / ".nocturne-transfers" / name,
+                          "Another process is still using this download. Try again shortly.")
+
+
 def dispatch(action, payload):
+    global selected_device, OUTPUT_DIR
+    if action in ("download", "tts_download", "chat_pull"):
+        model_folder_matches(payload)
+        rate = payload.get("bandwidth", 0)
+        TRANSFER_LIMIT.bytes_per_sec = max(0, min(rate, 5000 * 1024**2)) if type(rate) is int else 0
+        TRANSFER_LIMIT.job_id = payload.get("job_id")
+        device = payload.get("device")
+        if device == "cpu" or (isinstance(device, str) and re.fullmatch(r"cuda:\d+", device)):
+            selected_device = device
+        with download_lock(payload, action):
+            if action == "download":
+                return download(payload["model_id"], payload.get("kind", "image"), payload.get("revisions"),
+                                payload.get("variant"), bool(payload.get("repair")))
+            if action == "tts_download":
+                return tts_download(payload["model_id"], checked_revisions(payload.get("revisions") or {}).get(payload["model_id"]))
+            import chat_engine
+            def chat_progress(event, data):
+                emit_event(event, {**data, "job_id": payload.get("job_id")})
+            return chat_engine.dispatch(action, payload, MODEL_HOME, chat_progress)
+    if action in ("download_parts_info", "download_parts_delete"):
+        model_folder_matches(payload)
+        with download_lock(payload):
+            paths = partial_model_files(payload)
+            size = sum(path.stat().st_size for path in paths)
+            if action == "download_parts_delete":
+                if size != payload.get("expected_bytes"):
+                    raise ValueError("The partial files changed. Review the disk usage and try again.")
+                for path in paths:
+                    path.unlink()
+            return {"bytes": size, "files": len(paths)}
+    if action == "chat_download_plan":
+        return chat_download_plan(payload)
     if action.startswith("chat_"):
         import chat_engine
         return chat_engine.dispatch(action, payload, MODEL_HOME, emit_event)
-    global OUTPUT_DIR
     if action == "hf_auth_status":
         return {"logged_in": bool(get_token())}
     if action == "hf_login":
@@ -2499,7 +2868,7 @@ def dispatch(action, payload):
         return image_input_capability()
     if action == "edit_image":
         return edit_image(payload["prompt"], payload["image"], payload.get("strength", 0.65),
-                          payload.get("aspect_ratio", "1:1"), payload.get("temporary", False), image_context(payload))
+                          payload.get("aspect_ratio", "1:1"), payload.get("temporary", False), image_context(payload), payload.get("mask_image"))
     if action == "save_temporary_image":
         return save_temporary_image(payload["name"])
     if action == "batch_generate":
@@ -2526,8 +2895,6 @@ def dispatch(action, payload):
         return tts_info(payload["model_id"])
     if action == "tts_installed":
         return tts_installed()
-    if action == "tts_download":
-        return tts_download(payload["model_id"])
     if action == "tts_generate":
         return tts_generate(payload["model_id"], payload["text"])
     if action == "tts_gallery":
@@ -2541,9 +2908,7 @@ def dispatch(action, payload):
     if action == "search":
         return search(payload.get("query", ""), payload.get("kind", "image"), payload.get("image_only", False))
     if action == "info":
-        return model_info(payload["model_id"])
-    if action == "download":
-        return download(payload["model_id"], payload.get("kind", "image"))
+        return model_info(payload["model_id"], payload.get("kind"), payload.get("variant"))
     raise RuntimeError("فرمان ناشناخته است.")
 
 

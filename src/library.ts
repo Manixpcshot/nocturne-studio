@@ -1,8 +1,6 @@
-import { invoke } from '@tauri-apps/api/core';
-
 type Kind = 'image' | 'video' | 'voice' | 'chat';
 type Scope = 'find' | 'installed';
-export function mountLibrary(api: { busy: () => boolean; view: (view: string) => void; searchImage: () => Promise<void>; searchVoice: () => Promise<void>; symbol: (kind: Kind) => string }) {
+export function mountLibrary(api: { downloads: () => void; busy: () => boolean; view: (view: string) => void; searchImage: () => Promise<void>; searchVoice: () => Promise<void>; symbol: (kind: Kind) => string }) {
   const root = document.querySelector<HTMLElement>('#models-view')!;
   root.classList.add('unified-library');
   root.querySelector('h1')!.textContent = 'کتابخانهٔ مدل‌ها';
@@ -24,11 +22,11 @@ export function mountLibrary(api: { busy: () => boolean; view: (view: string) =>
   voice.append(voiceLocal,voiceSearch);
   const chat=root.querySelector<HTMLDetailsElement>('.chat-model-manager')!;
   root.append(voice,chat);
-  const progress=document.createElement('details');progress.className='library-downloads model-fold';progress.open=false;
-  progress.innerHTML='<summary>دانلودها <span class="fold-chevron">⌄</span></summary><div class="library-download-body"><p id="library-download-status">دانلودها با انتخاب شما شروع می‌شوند.</p><button id="library-cancel" class="small-button" hidden>توقف دانلود</button></div>';
-  const body=progress.querySelector('.library-download-body')!;
-  body.append(document.querySelector('#download-progress')!,document.querySelector('#voice-download-progress')!,document.querySelector('#chat-progress')!);
-  body.append(root.querySelector('#resume-download')!);
+  const downloads = document.createElement('button');
+  downloads.type = 'button';
+  downloads.className = 'small-button';
+  downloads.textContent = 'مرکز دانلود';
+  downloads.onclick = api.downloads;
   const controls = document.createElement('div');
   controls.className = 'library-utilities';
   const folders = document.createElement('button');
@@ -39,26 +37,8 @@ export function mountLibrary(api: { busy: () => boolean; view: (view: string) =>
     api.view('settings');
     document.querySelector<HTMLButtonElement>('[data-settings-tab="storage"]')!.click();
   };
-  controls.append(progress, diffusion.querySelector('.library-tools-fold')!, folders);
+  controls.append(downloads, diffusion.querySelector('.library-tools-fold')!, folders);
   header.after(controls);
-  const feedback=document.querySelector<HTMLElement>('#library-download-status')!;
-  const cancel=document.querySelector<HTMLButtonElement>('#library-cancel')!;
-  cancel.onclick=()=>void invoke('cancel_download').catch(error=>{feedback.textContent=String(error);});
-  // Keep existing engine-specific progress paths, with one visible download centre.
-  for(const id of ['voice-status','download-phase']){
-    const source=document.getElementById(id)!;
-    new MutationObserver(()=>{
-      if(api.busy()){feedback.textContent=source.textContent;progress.open=true;}
-      cancel.hidden=!api.busy();
-    }).observe(source,{subtree:true,childList:true,characterData:true});
-  }
-  new MutationObserver(()=>{if (!api.busy()) cancel.hidden=true;}).observe(document.getElementById('work-status')!,{subtree:true,childList:true});
-  document.addEventListener('nocturne-chat-download', event => {
-    const {active, text} = (event as CustomEvent<{active: boolean; text: string}>).detail;
-    feedback.textContent = text;
-    cancel.hidden = !active;
-    progress.open = true;
-  });
   const query=document.querySelector<HTMLInputElement>('#library-query')!;
   const source=document.querySelector<HTMLElement>('#library-source')!;
   const chatSource=document.createElement('select');chatSource.id='library-chat-source';chatSource.setAttribute('aria-label','منبع مدل چت');
@@ -123,6 +103,17 @@ export function mountLibrary(api: { busy: () => boolean; view: (view: string) =>
   document.querySelectorAll<HTMLButtonElement>('[data-chat-preset]').forEach(button=>button.addEventListener('click',()=>{chatSource.value='ollama';query.value=button.dataset.chatPreset!;void search();}));
   document.querySelectorAll<HTMLButtonElement>('[data-search-family]').forEach(button=>button.addEventListener('click',()=>{query.value=button.dataset.searchFamily!;}));
   for(const [id,value] of [['persian-voice-search','فارسی'],['popular-voice-search','']])document.getElementById(id)!.addEventListener('click',()=>{query.value=value;});
+  const discovery = document.createElement('div');
+  discovery.className = 'library-discovery engine-presets';
+  for (const name of ['FLUX', 'FLUX.2', 'Uncensored', 'FLUX Uncensored']) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'small-button';
+    button.textContent = name;
+    button.onclick = () => { selectScope('find'); select('image'); query.value = name; void search(); };
+    discovery.append(button);
+  }
+  header.querySelector('.library-search')!.after(discovery);
   selectScope('find');
   select('image',false);
 }

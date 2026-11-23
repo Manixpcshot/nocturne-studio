@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
@@ -225,6 +226,9 @@ struct DownloadState {
     pid: AtomicU32,
 }
 
+type DownloadWorkers = Arc<Mutex<HashMap<String, Arc<DownloadState>>>>;
+struct ModelDownloadState(DownloadWorkers);
+
 impl DownloadState {
     fn new() -> Self {
         Self { active: AtomicBool::new(false), cancelled: AtomicBool::new(false), pid: AtomicU32::new(0) }
@@ -330,6 +334,75 @@ fn set_output_folder(state: State<'_, Arc<Mutex<Option<Backend>>>>, path: String
     save_folder(state, path, "output_folder", false)
 }
 
+fn send_backend_request(backend: &mut Backend, app: &AppHandle, action: &str, payload: Value) -> Result<Value, String> {
+    let request = json!({"action": action, "payload": payload});
+    writeln!(backend.stdin, "{request}").map_err(|e| e.to_string())?;
+    backend.stdin.flush().map_err(|e| e.to_string())?;
+    loop {
+    let mut line = String::new();
+    let read = backend.stdout.read_line(&mut line).map_err(|e| e.to_string())?;
+    if read == 0 {
+        return Err("موتور Python بسته شد.".into());
+    }
+    let response: Value = serde_json::from_str(&line)
+        .map_err(|e| format!("پاسخ نامعتبر از موتور: {e}"))?;
+    if let Some(event) = response.get("event").and_then(Value::as_str) {
+        if matches!(event, "download-progress" | "batch-progress" | "queue-progress" | "chat-progress" | "chat-token" | "chat-agent-step") {
+            let _ = app.emit(event, &response["data"]);
+            continue;
+        }
+    }
+    return Ok(response);
+    }
+}
+
+#[tauri::command]
+async fn model_download(
+    app: AppHandle,
+    state: State<'_, ModelDownloadState>,
+    job_id: String,
+    action: String,
+    payload: Value,
+) -> Result<Value, String> {
+    if !matches!(action.as_str(), "download" | "tts_download" | "chat_pull") {
+        return Err("Invalid model download command.".into());
+    }
+    let workers = Arc::clone(&state.0);
+    let worker = Arc::new(DownloadState::new());
+    {
+        let mut jobs = workers.lock().map_err(|error| error.to_string())?;
+        if jobs.len() >= 2 || jobs.contains_key(&job_id) {
+            return Err("Another process is still running a download.".into());
+        }
+        jobs.insert(job_id.clone(), Arc::clone(&worker));
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        let result = (|| {
+            let mut backend = start_backend(&app)?;
+            worker.pid.store(backend.child.id(), Ordering::SeqCst);
+            worker.active.store(true, Ordering::SeqCst);
+            send_backend_request(&mut backend, &app, &action, payload)
+        })();
+        worker.finish();
+        if let Ok(mut jobs) = workers.lock() {
+            jobs.remove(&job_id);
+        }
+        if worker.cancelled.swap(false, Ordering::SeqCst) && result.is_err() {
+            return Err("Download paused; received files were kept.".into());
+        }
+        result
+    }).await.map_err(|error| format!("Download worker stopped: {error}"))?
+}
+
+#[tauri::command]
+async fn cancel_model_download(state: State<'_, ModelDownloadState>, job_id: String) -> Result<bool, String> {
+    let worker = state.0.lock().map_err(|error| error.to_string())?.get(&job_id).cloned();
+    let Some(worker) = worker else { return Ok(false); };
+    tauri::async_runtime::spawn_blocking(move || stop_backend(&worker))
+        .await
+        .map_err(|error| format!("Could not pause the download: {error}"))?
+}
+
 #[tauri::command]
 async fn backend_command(
     app: AppHandle,
@@ -352,27 +425,7 @@ async fn backend_command(
         download.pid.store(backend.child.id(), Ordering::SeqCst);
         download.active.store(true, Ordering::SeqCst);
     }
-    let request = json!({"action": action, "payload": payload});
-    let outcome = (|| -> Result<Value, String> {
-        writeln!(backend.stdin, "{request}").map_err(|e| e.to_string())?;
-        backend.stdin.flush().map_err(|e| e.to_string())?;
-        loop {
-        let mut line = String::new();
-        let read = backend.stdout.read_line(&mut line).map_err(|e| e.to_string())?;
-        if read == 0 {
-            return Err("موتور Python بسته شد.".into());
-        }
-        let response: Value = serde_json::from_str(&line)
-            .map_err(|e| format!("پاسخ نامعتبر از موتور: {e}"))?;
-        if let Some(event) = response.get("event").and_then(Value::as_str) {
-            if matches!(event, "download-progress" | "batch-progress" | "queue-progress" | "chat-progress" | "chat-token" | "chat-agent-step") {
-                let _ = app.emit(event, &response["data"]);
-                continue;
-            }
-        }
-        return Ok(response);
-        }
-    })();
+    let outcome = send_backend_request(backend, &app, &action, payload);
     if is_download {
         download.finish();
     }
@@ -400,6 +453,10 @@ fn notify_image_ready(app: tauri::AppHandle, message: String) -> Result<(), Stri
 
 #[tauri::command]
 fn cancel_download(download: State<'_, Arc<DownloadState>>) -> Result<bool, String> {
+    stop_backend(&download)
+}
+
+fn stop_backend(download: &DownloadState) -> Result<bool, String> {
     if !download.active.load(Ordering::SeqCst) {
         return Ok(false);
     }
@@ -432,7 +489,8 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .manage(Arc::new(Mutex::<Option<Backend>>::new(None)))
         .manage(Arc::new(DownloadState::new()))
-        .invoke_handler(tauri::generate_handler![backend_command, notify_image_ready, cancel_download, set_model_folder, set_output_folder, setup_status, setup_install, update_diffusers_engine, hardware_usage])
+        .manage(ModelDownloadState(Arc::new(Mutex::new(HashMap::new()))))
+        .invoke_handler(tauri::generate_handler![backend_command, model_download, cancel_model_download, notify_image_ready, cancel_download, set_model_folder, set_output_folder, setup_status, setup_install, update_diffusers_engine, hardware_usage])
         .run(tauri::generate_context!())
         .expect("failed to run Tauri app");
 }

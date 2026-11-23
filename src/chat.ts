@@ -49,7 +49,7 @@ export function formatMessage(text: string) {
   }).join('');
 }
 
-export function mountChat(api: { call: (action: string, payload?: Record<string, unknown>) => Promise<any>; busy: () => boolean; setBusy: (value: boolean, label?: string) => void; view: (name: string) => void; symbol: string }) {
+export function mountChat(api: { queueDownload: (id: string, payload: Record<string, unknown>, size?: number) => void; call: (action: string, payload?: Record<string, unknown>) => Promise<any>; busy: () => boolean; setBusy: (value: boolean, label?: string) => void; view: (name: string) => void; symbol: string }) {
   const nav = document.createElement('button');
   nav.className = 'nav-item'; nav.dataset.view = 'chat';
   nav.innerHTML = `${api.symbol}<span>چت و کدنویسی</span>`;
@@ -281,42 +281,14 @@ export function mountChat(api: { call: (action: string, payload?: Record<string,
   const searchResults=document.createElement('div');searchResults.id='chat-search-results';
   searchResults.innerHTML = '<p class="chat-search-note">برای پیدا کردن مدل، در کادر بالای کتابخانه جست‌وجو کن.</p>';
   catalog.prepend(searchResults);
-  const pull = async (payload: Record<string, unknown>) => {
-    if (api.busy()) return;
-    api.setBusy(true, 'در حال دانلود مدل چت...');
-    status.textContent = 'در حال آماده‌سازی دانلود مدل و موتور…';
-    const progress = q<HTMLProgressElement>('chat-progress');
-    progress.hidden = false;
-    progress.removeAttribute('value');
-    const publishProgress = (active: boolean) => {
-      document.dispatchEvent(new CustomEvent('nocturne-chat-download', {detail: {active, text: status.textContent}}));
-    };
-    publishProgress(true);
-    let off = () => {};
-    let selected: string | undefined;
-    try {
-      off = await listen<{ status?: string; completed?: number; total?: number }>('chat-progress', ({ payload: event }) => {
-        if (event.total) progress.value = Math.min(100, (event.completed || 0) / event.total * 100);
-        else progress.removeAttribute('value');
-        status.textContent = event.total
-          ? `${event.status || ''} · ${Math.round(progress.value)}٪ · ${((event.completed || 0)/1024**3).toFixed(2)} / ${(event.total/1024**3).toFixed(2)} GB`
-          : event.status || 'در حال آماده‌سازی…';
-        publishProgress(true);
-      });
-      const result = await api.call('chat_pull', payload);
-      selected = result.model;
-      status.textContent = 'مدل آمادهٔ گفت‌وگو است.';
-      installedFold.open = true;
-    } catch (error) {
-      setStatus(String(error));
-    } finally {
-      off();
-      progress.hidden = true;
-      api.setBusy(false);
-      publishProgress(false);
-      if (selected) await refresh(selected);
-    }
+  const pull = (payload: Record<string, unknown>, size?: number) => {
+    const id = String(payload.model || payload.repo || '');
+    if (id) api.queueDownload(id, payload, size);
   };
+  document.addEventListener('nocturne-chat-installed', event => {
+    const id = (event as CustomEvent<string>).detail;
+    if (id) { installedFold.open = true; void refresh(id); }
+  });
   document.addEventListener('nocturne-chat-search',async event=>{
     if(api.busy())return;
     api.setBusy(true,'در حال جست‌وجوی مدل‌های چت...');
@@ -358,8 +330,8 @@ export function mountChat(api: { call: (action: string, payload?: Record<string,
           download.onclick = () => {
             const variant = variants[Number(variantSelect.value)];
             const engine = engineSelect.value;
-            if (engine === 'ollama' && variant.ollama_tag) void pull({model: `hf.co/${repo}:${variant.ollama_tag}`});
-            if (engine !== 'ollama') void pull({engine, repo, revision: info.revision, filename: variant.filenames[0]});
+            if (engine === 'ollama' && variant.ollama_tag) void pull({model: `hf.co/${repo}:${variant.ollama_tag}`}, variant.size);
+            if (engine !== 'ollama') void pull({engine, repo, revision: info.revision, filename: variant.filenames[0]}, variant.size);
           };
         }catch(error){target.textContent=String(error);}finally{button.disabled=false;api.setBusy(false);}
       });

@@ -1,4 +1,9 @@
 export const additionalTranslations: Record<string, string> = {
+  "جزئیات دسترسی": "Access details",
+  "انتخاب نسخهٔ دیگر": "Choose another variant",
+  "ماسک سیاه‌وسفید برای FLUX Fill": "Black-and-white mask for FLUX Fill",
+  "مرکز دانلود": "Download center",
+  "بررسی و دانلود": "Review and download",
   "پروژه": "Project",
   "پروژهٔ جدید": "New project",
   "نام پروژه": "Project name",

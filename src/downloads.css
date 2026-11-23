@@ -1,0 +1,28 @@
+dialog.transfer-dialog { width: min(760px, calc(100vw - 36px)); }
+.transfer-dialog header { display: flex; align-items: center; justify-content: space-between; gap: 9px; margin-bottom: 10px; }
+.transfer-dialog h2 { margin: 0; }
+.transfer-toolbar { display: flex; gap: 9px; flex-wrap: wrap; align-items: end; padding-bottom: 12px; color: var(--quiet); font-size: 11px; }
+.transfer-toolbar input { max-width: 100px; }
+.transfer-item { background: var(--well); border: 1px solid var(--border); border-radius: 10px; padding: 10px; margin: 8px 0; overflow-wrap: anywhere; }
+.transfer-item-heading, .transfer-meta, .transfer-buttons { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 5px 10px; font-size: 12px; }
+.transfer-item-heading strong { min-width: 0; }
+.transfer-item-heading span { color: var(--accent); }
+.transfer-item progress { width: 100%; margin: 7px 0 1px; accent-color: var(--accent); }
+.transfer-meta, .transfer-item small { color: var(--quiet); font-size: 11px; }
+.transfer-buttons { justify-content: start; margin-top: 8px; }
+.transfer-error { color: var(--danger); font-size: 12px; overflow-wrap: anywhere; }
+.transfer-empty { color: var(--quiet); font-size: 12px; }
+.transfer-figures { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 7px; }
+.transfer-figures div { min-width: 0; background: var(--well); border-radius: 8px; padding: 7px; }
+.transfer-figures dt { color: var(--quiet); font-size: 11px; }
+.transfer-figures dd { margin: 2px 0 0; font-size: 13px; font-weight: 600; overflow-wrap: anywhere; }
+#download-plan p, #download-plan li, #download-plan summary { font-size: 12px; }
+#download-plan ul { max-height: min(240px, 32vh); overflow-y: auto; list-style: none; padding: 0; }
+#download-plan li { display: flex; justify-content: space-between; gap: 8px; border-bottom: 1px solid var(--border); padding-block: 5px; }
+#download-plan li bdi { overflow-wrap: anywhere; }
+#download-plan li span { flex: none; color: var(--quiet); }
+#download-plan a { color: var(--accent); }
+#download-plan label[hidden] { display: none; }
+#transfer-variant { width: 100%; }
+.transfer-path { overflow-wrap: anywhere; color: var(--quiet); }
+#models-view:not([data-library-kind="image"]) .library-discovery, #models-view[data-library-scope="installed"] .library-discovery { display: none; }

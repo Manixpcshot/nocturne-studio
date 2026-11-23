@@ -13,6 +13,7 @@ import { mountLibrary } from './library';
 import { mountWorkspacePreferences, pageInfo, rememberPage, startPage, workspacePages } from './workspace-ui';
 import brandIcon from './assets/nocturne-icon.png';
 import './redesign.css';
+import { mountDownloadCenter, type DownloadJob, type DownloadKind, type DownloadPlan, type Transfer } from './downloads';
 import { hideStartup, showStartup, startupFailed } from './startup';
 import './projects.css';
 import { activateProject, addProject, buildCombinations, newId, pendingQueue, persistQueue, projectId, projects, relatedImages, scopedKey, stored, type QueueJob } from './projects';
@@ -25,7 +26,6 @@ type GalleryItem = ImageMetadata & { name: string; thumbnail: string; date: stri
 type Device = { id: string; name: string };
 type LoadedModel = { id: string; kind: string; active: boolean };
 type Status = { models: string[]; video_models: string[]; sdcpp_models: string[]; checkpoint_models: string[]; adapters: string[]; active: string | null; active_kind: string; loaded_models: LoadedModel[]; cache_enabled: boolean; devices: Device[]; device: string; images: number; model_folder: string; output_folder: string };
-type DownloadProgress = { model_id: string; phase?: string; file?: string; attempt?: number; processed?: number; received?: number; total?: number; speed?: number };
 type HardwareUsage = { ram_used: number | null; ram_total: number | null; gpu_used: number | null; gpu_total: number | null; gpu_percent: number | null };
 
 const icons = { Aperture, Images, Blocks, Search, Download, Sparkles, ArrowUpLeft, RefreshCw, Check, Cpu, HardDrive, X, WandSparkles, ExternalLink, Film, Play, AudioLines, Mic2, Layers, Lightbulb, FolderOpen, Globe2, ImagePlus, ShieldCheck, ScanEye, SlidersHorizontal, Save, Star, LockKeyhole, Bell, House, Settings };
@@ -132,6 +132,7 @@ let voiceSearchResults: { id: string; language: string; downloads: number }[] = 
 const voiceInspections = new Map<string, { engine: string | null; reason: string; size_gb: number | null }>();
 let currentImage: string | null = null;
 let editSourceImage = '';
+let editMaskImage = '';
 let currentImageName = '';
 let currentImageTemporary = false;
 let hideImage = localStorage.getItem('nocturne-hide-image') === '1';
@@ -283,7 +284,6 @@ function applyPrivacy() {
   if (privacyCover) document.querySelectorAll<HTMLDialogElement>('dialog[open]').forEach(dialog => dialog.close());
 }
 let busy = false;
-let cancellingDownload = false;
 let lastDownloadActivity = 0;
 let hardwarePoll: number | null = null;
 let readingHardware = false;
@@ -300,30 +300,8 @@ function bytes(value: number) {
   return `${(value / 1024 ** unit).toLocaleString('fa-IR', { maximumFractionDigits: unit ? 1 : 0 })} ${units[unit]}`;
 }
 
-function updateDownloadProgress(progress: DownloadProgress) {
-  if (progress.model_id === activeVoiceDownload) {
-    const panel = document.querySelector<HTMLElement>('#voice-download-progress');
-    if (panel) {
-      panel.hidden = false;
-      const percent = progress.total && progress.processed ? Math.min(100, Math.round(progress.processed / progress.total * 100)) : 0;
-      document.querySelector<HTMLElement>('#voice-download-track')!.style.width = `${percent}%`;
-      document.querySelector<HTMLElement>('#voice-download-stats')!.textContent = `${percent.toLocaleString('fa-IR')}٪ · ${bytes(progress.processed || 0)} از ${bytes(progress.total || 0)} · ${bytes(progress.speed || 0)}/ثانیه`;
-    }
-    return;
-  }
-  const panel = document.querySelector<HTMLElement>('#download-progress');
-  if (!panel || panel.dataset.model !== progress.model_id) return;
-  lastDownloadActivity = Date.now();
-  const phases: Record<string, string> = { checking: 'در حال بررسی مخزن و اندازهٔ فایل‌ها...', reading: 'در حال بررسی سازگاری مدل...', starting: 'در حال اتصال و آماده‌سازی دانلود...', resuming: 'در حال ادامهٔ فایل‌های نیمه‌دانلودشده...', transferring: 'در حال دریافت و ذخیرهٔ فایل‌ها...', retrying: 'ارتباط قطع شد؛ در حال اتصال دوباره...', complete: 'دانلود کامل شد.' };
-  if (progress.phase) document.querySelector<HTMLElement>('#download-phase')!.textContent = `${phases[progress.phase] || progress.phase}${progress.file ? ` ${progress.file}` : ''}${progress.phase === 'retrying' && progress.attempt ? ` · تلاش ${progress.attempt.toLocaleString('fa-IR')}` : ''}`;
-  if (progress.total === undefined || progress.processed === undefined || progress.received === undefined || progress.speed === undefined) return;
-  const percent = progress.total ? Math.min(100, Math.round(progress.processed / progress.total * 100)) : 0;
-  document.querySelector<HTMLElement>('#download-percent')!.textContent = `${percent.toLocaleString('fa-IR')}٪`;
-  document.querySelector<HTMLElement>('#download-fill')!.style.width = `${percent}%`;
-  document.querySelector<HTMLElement>('#download-processed')!.textContent = `فایل‌ها: ${bytes(progress.processed)} از ${bytes(progress.total)}`;
-  document.querySelector<HTMLElement>('#download-received')!.textContent = `دریافت از اینترنت: ${bytes(progress.received)}`;
-  document.querySelector<HTMLElement>('#download-speed')!.textContent = `سرعت میانگین: ${bytes(progress.speed)}/ثانیه`;
-}
+let downloadCenter: ReturnType<typeof mountDownloadCenter>;
+let downloadsReady = false;
 
 async function call<T>(action: string, payload: Record<string, unknown> = {}): Promise<T> {
   const response = await invoke<ApiResult<T>>('backend_command', { action, payload });
@@ -466,6 +444,9 @@ function organizeStudioView() {
   const compare = view.querySelector('.compare-panel')!;
   const edit = view.querySelector('.edit-panel')!;
   settings.before(edit);
+  edit.querySelector('.edit-grid')!.insertAdjacentHTML('beforeend', `
+    <label class="edit-upload"><span>ماسک سیاه‌وسفید برای FLUX Fill</span>
+      <input id="edit-mask" type="file" accept="image/png,image/jpeg,image/webp"/></label>`);
   edit.querySelector('.edit-grid')!.insertAdjacentHTML('afterend',
     `<div id="project-references" class="reference-picker" hidden>
       <label for="project-reference-select">عکس‌های مرجع پروژه</label>
@@ -631,7 +612,7 @@ function render() {
         </section>
         <section class="view" id="batch-view"><div class="section-head"><span class="eyebrow">BATCH STUDIO</span><h1>ساخت دسته‌ای</h1><p>موضوع را بنویس، تعداد را انتخاب کن و در صورت تمایل، کار را بین GPU و CPU تقسیم کن.</p></div><div class="batch-layout"><div class="model-card batch-card"><div class="card-heading"><div>${icon('Layers')}<h2>تنظیمات ساخت دسته‌ای</h2></div></div><label class="batch-label" for="batch-topic">موضوع تصویرها</label><textarea id="batch-topic" class="batch-topic" placeholder="مثلاً: شهر آینده در شب، نورهای نئون، هوای بارانی"></textarea><div class="batch-count-row"><label class="batch-label" for="batch-count">تعداد تصویر</label><input id="batch-count" type="number" min="1" step="1" value="10"/><span>بدون سقف تعداد</span></div>${aspectPicker('batch-aspect')}<label class="batch-split"><input id="batch-split-cpu" type="checkbox"/> نصف تصویرها در پردازش GPU و نصف دیگر در پردازش جداگانهٔ CPU</label><p class="batch-split-note">دو پردازش مستقل، هرکدام عکس‌های سهم خود را یکی‌یکی می‌سازند. مدل CPU رم بیشتری می‌گیرد و ممکن است کندتر باشد.</p><div class="batch-actions"><button class="primary-button" id="start-batch" data-work>${icon('Sparkles', 18)} شروع ساخت</button><button class="cancel-download" id="stop-batch" hidden>توقف ساخت</button></div><p class="batch-note">Each image is saved when ready. Active model: <b id="batch-model">انتخاب نشده</b></p><div id="batch-progress" class="batch-progress hidden"><div class="download-head"><strong id="batch-state">در حال آماده‌سازی...</strong><b id="batch-percent">۰٪</b></div><div class="download-track"><div id="batch-fill"></div></div><p id="batch-details">۰ از ۰ تصویر ساخته شد</p><p id="batch-workers">GPU: ۰ · CPU: ۰</p></div></div><div class="model-card ideas-card"><div class="card-heading"><div>${icon('Lightbulb')}<h2>ایده‌ها</h2></div><button class="small-button" id="shuffle-ideas">ایده‌های دیگر</button></div><p class="ideas-intro">روی یک ایده بزن تا در کادر موضوع قرار بگیرد.</p><div id="ideas-list" class="ideas-list"></div></div></div><div class="model-card queue-card"><div class="card-heading"><div>${icon('Layers')}<h2>صف چندمدلی</h2></div><button class="small-button" id="queue-add">افزودن مدل</button></div><p class="queue-hint">موضوع را در کادر بالا بنویس. مدل‌ها به ترتیب ردیف‌ها اجرا می‌شوند و هر عکس همان لحظه ذخیره می‌شود.</p><div id="queue-rows"></div><div class="queue-total">مجموع: <b id="queue-total">۰</b> عکس</div><div class="batch-actions"><button class="primary-button" id="queue-start" data-work>${icon('Sparkles', 18)} شروع صف</button><button class="cancel-download" id="queue-stop" hidden>توقف صف</button></div><div id="queue-progress" class="batch-progress hidden"><div class="download-head"><strong id="queue-state">در انتظار شروع</strong><b id="queue-percent">۰٪</b></div><div class="download-track"><div id="queue-fill"></div></div><p id="queue-details">۰ عکس ساخته شد</p></div></div><div class="model-card snake-card hidden" id="snake-card"><div class="card-heading"><div>${icon('Sparkles')}<h2>مار بازی هنگام ساخت</h2></div><button class="small-button" id="snake-restart">شروع دوباره</button></div><p id="snake-message">با کلیدهای جهت‌دار یا WASD بازی کن. ساخت عکس‌ها ادامه دارد.</p><div class="snake-content"><canvas id="snake-canvas" width="320" height="320" aria-label="بازی مار"></canvas><div class="snake-side"><b>Score: <span id="snake-score">۰</span></b><div class="snake-controls"><button data-snake-dir="up">↑</button><button data-snake-dir="left">←</button><button data-snake-dir="down">↓</button><button data-snake-dir="right">→</button></div></div></div></div></section>
         <section class="view" id="video-view"><div class="section-head"><span class="eyebrow">MOTION STUDIO</span><h1>ساخت ویدیو</h1><p>مدل ویدیوساز را انتخاب کن، پرامپت بنویس و ویدیو را روی سیستم ذخیره کن.</p></div><div class="video-layout"><div class="canvas-panel"><div class="panel-top"><div><span class="panel-kicker">بوم ویدیو</span><h2 id="video-title">هنوز ویدیویی ساخته نشده</h2></div></div><div class="video-stage" id="video-stage"><div class="empty-state"><div class="empty-icon">${icon('Film', 42)}</div><h3>ویدیوی تو اینجا نمایش داده می‌شود</h3><p>مدل ویدیوساز را از بخش مدل‌ها انتخاب کن.</p></div></div></div><div class="composer"><div class="composer-top"><span>${icon('Sparkles', 16)} پرامپت ویدیو</span><span>فارسی یا انگلیسی بنویس</span></div><textarea id="video-prompt" placeholder="مثلاً: روباهی در جنگل برفی قدم می‌زند، حرکت دوربین آرام..."></textarea><div class="composer-bottom"><button class="model-pill" id="video-model-pill">${icon('Blocks', 16)}<span id="active-video-model-label">انتخاب مدل ویدیو</span></button><button class="primary-button" id="generate-video" data-work>${icon('Film', 18)}<span>ساخت ویدیو</span><span class="button-shine"></span></button></div></div><div class="model-card"><div class="card-heading"><div>${icon('Film')}<h2>ویدیوهای ساخته‌شده</h2></div></div><div id="video-gallery" class="video-gallery"></div></div></div></section>
-        <section class="view" id="voice-view"><div class="voice-hero"><span class="eyebrow">VOICE STUDIO</span><h1>ساخت صدا</h1><p>زبان را جست‌وجو کن، مدل گفتار را نصب کن و صدای خودت را بساز.</p><div class="voice-bars"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div></div><div class="voice-layout"><div class="voice-card"><h2>ساخت گفتار</h2><label for="voice-text">متنی که خوانده شود</label><textarea maxlength="500" id="voice-text" placeholder="متن فارسی یا زبان انتخابی را اینجا بنویس..."></textarea><label for="voice-model-select">مدل نصب‌شده و زبان</label><select id="voice-model-select"></select><button id="refresh-installed-voices" class="small-button">بازخوانی مدل‌های نصب‌شده</button><div id="installed-voices" class="installed-voices"></div><button id="voice-generate" class="primary-button">ساخت صدا</button><button id="voice-stop" class="small-button" hidden>توقف ساخت یا دانلود صدا</button><p id="voice-status">صدا در پوشهٔ خروجی ذخیره می‌شود.</p><div id="voice-download-progress" class="voice-download-progress" hidden><div id="voice-download-track"></div><span id="voice-download-stats"></span></div><div id="voice-player" class="voice-player">صدای ساخته‌شده اینجا پخش می‌شود.</div></div><div class="voice-card"><h2>جست‌وجوی مدل صدا</h2><p id="voice-folder"></p><button class="small-button" id="voice-change-folder">تغییر پوشهٔ دانلود مدل‌ها</button><p>نام زبان را فارسی، انگلیسی یا با کد سه‌حرفی بنویس.</p><div class="search-row"><input id="voice-search-input" value="فارسی" placeholder="زبان"/><button id="voice-search-button">جست‌وجو</button></div><button id="persian-voice-search" class="small-button">مدل‌های فارسی</button><button id="popular-voice-search" class="small-button">مدل‌های محبوب</button><div id="voice-search-results"></div></div></div></section><section class="view" id="audio-gallery-view"><div class="section-head"><span class="eyebrow">SOUND LIBRARY</span><h1>گالری صدا</h1><p>صداهای ساخته‌شده و متن هر کدام اینجاست.</p></div><div id="voice-gallery" class="voice-gallery"></div></section><section class="view" id="models-view"><div class="section-head"><span class="eyebrow">MODEL LIBRARY</span><h1>مدل‌ها و جست‌وجو<span>.</span></h1><p>مدل‌های ذخیره‌شده را انتخاب کن یا مدل جدیدی در Hugging Face پیدا کن.</p></div><div class="kind-tabs"><button class="kind-tab active" data-kind="image">${icon('Images', 16)} مدل‌های تصویر</button><button class="kind-tab" data-kind="video">${icon('Film', 16)} مدل‌های ویدیو</button><button class="kind-tab" id="voice-model-tab">${icon('Mic2', 16)} مدل‌های صدا</button></div><div class="model-layout"><div class="model-card"><div class="card-heading"><div>${icon('HardDrive')}<h2>مدل‌های روی سیستم</h2></div><button class="icon-button" id="refresh-models" title="به‌روزرسانی">${icon('RefreshCw')}</button></div><div id="local-models" class="model-list"></div><div class="cache-settings"><div class="cache-head">${icon('Cpu', 17)} <b>مدل‌ها در حافظه</b></div><label class="memory-toggle"><input id="keep-models-loaded" type="checkbox" ${keepLoaded ? 'checked' : ''}/> مدل‌های قبلی در رم بمانند</label><p>با روشن‌بودن این گزینه، جابه‌جایی دوباره سریع‌تر است؛ مدل‌های غیرفعال از کارت گرافیک به رم منتقل می‌شوند و رم بیشتری می‌گیرند. کنار هر مدل دکمهٔ خروج از حافظه هست.</p><label class="startup-label" for="startup-model">مدل هنگام بازشدن برنامه</label><select id="startup-model" class="startup-select"></select><p>«هیچ‌کدام» یعنی برنامه بدون بارگذاری خودکار مدل باز شود.</p></div><div class="cache-settings"><div class="cache-head">${icon('FolderOpen', 17)} <b>پوشهٔ دانلود مدل‌ها</b></div><div id="model-folder" class="cache-path">در حال بررسی...</div><button id="choose-model-folder" class="small-button" data-work>انتخاب پوشه</button><p>مدل‌های قبلی سر جای خود می‌مانند. دانلودهای جدید به پوشهٔ انتخابی می‌روند.</p></div><div class="cache-settings"><div class="cache-head">${icon('FolderOpen', 17)} <b>پوشهٔ ذخیرهٔ عکس و ویدیو</b></div><div id="output-folder" class="cache-path">در حال بررسی...</div><button id="choose-output-folder" class="small-button" data-work>تغییر پوشه</button><p>فایل‌های قبلی در پوشهٔ قبلی می‌مانند؛ فایل‌های جدید در پوشهٔ انتخابی ذخیره می‌شوند.</p></div><div class="cache-settings"><div class="cache-head">${icon('HardDrive', 17)} <b>فضای استفاده‌شده</b></div><div class="storage-stats"><div>مدل‌های دانلودشده <strong id="models-size">...</strong></div><div>عکس‌ها <strong id="images-size">...</strong></div><div>ویدیوها <strong id="videos-size">...</strong></div></div><button id="refresh-storage" class="small-button">به‌روزرسانی حجم‌ها</button></div></div><div class="model-card search-card"><div class="card-heading"><div>${icon('Search')}<h2>جست‌وجوی Hugging Face</h2></div></div><div class="featured-model"><div class="featured-badge">مدل پیشنهادی · تصویر انیمه</div><strong>Animagine XL 3.1</strong><span>cagliostrolab/animagine-xl-3.1</span><p>نسخهٔ SDXL برای تصویرهای انیمه. فقط فایل‌های لازم برای اجرا دانلود می‌شوند؛ حدود ۷ گیگابایت فضا لازم است.</p><button id="featured-animagine" class="small-button" data-work>دانلود مدل</button></div><div class="featured-model featured-lora"><div class="featured-badge">LoRA · نیازمند مدل پایه</div><strong>Qwen Image 2.1 Omni LoRA</strong><span>chatrlabs/Qwen-Image-2.1-Uncensored-Omni-LoRA-v0.1</span><p>فایل LoRA حدود ۶۷۱ مگابایت است. برای ساخت تصویر باید مدل پایهٔ Qwen/Qwen-Image-2.1 جداگانه نصب شود.</p><button id="featured-qwen-lora" class="small-button" data-work>دانلود LoRA</button></div><div class="featured-model featured-gguf"><div class="featured-badge">GGUF · نیازمند موتور دیگر</div><strong>Qwen Image 2.1 Turbo Uncensored GGUF</strong><span>AtomicChat/Qwen-Image-2.1-Turbo-Uncensored-GGUF</span><p>این مخزن رمزگذار متن GGUF است. با «نصب با موتور»، فایل تصویرساز، VAE و موتور stable-diffusion.cpp نیز خودکار دریافت می‌شوند؛ مجموع دانلود حدود ۱۰ گیگابایت است و فقط با کلیک شما شروع می‌شود.</p><button id="featured-gguf" class="small-button" data-work>نصب با موتور</button></div><div class="hf-auth"><b>دسترسی Hugging Face برای مدل‌های محدود</b><p>اگر صفحهٔ مدل از تو پذیرش شرایط می‌خواهد، ابتدا در سایت Hugging Face تأییدش کن، سپس توکن خواندن خودت را اینجا وارد کن.</p><input id="hf-token" type="password" placeholder="HF read token" autocomplete="off"/><button id="hf-login" class="small-button">ورود با توکن</button><span id="hf-auth-status"></span></div><div class="featured-model"><div class="featured-badge">FLUX · مدل تصویرساز</div><strong>FLUX.1 Schnell و Dev</strong><p>مدل کامل با Diffusers اجرا می‌شود. نسخه‌های GGUF از city96 و leejet با موتور stable-diffusion.cpp و فایل‌های CLIP-L، T5-XXL و VAE نصب می‌شوند؛ ابتدا بررسی حجم را بزن.</p><button id="flux-search" class="small-button">پیداکردن FLUX</button><button id="flux-gguf-search" class="small-button">FLUX GGUF · موتور CPU و CUDA</button><button id="flux-free" class="small-button">FLUX.1 Schnell بدون مجوز ویژه · حدود ۵۴ GB</button></div><div class="search-presets"><button id="favorites-filter" class="small-button">☆ فقط علاقه‌مندی‌ها</button><button id="uncensored-search" class="small-button">مدل‌های Uncensored</button><span>تا ۵۰۰ نتیجه؛ با دکمهٔ «نمایش بیشتر»</span></div><div class="engine-presets"><button class="small-button" data-search-family="Qwen-Image" data-search-kind="image">Qwen Image</button><button class="small-button" data-search-family="FLUX" data-search-kind="image">FLUX</button><button class="small-button" data-search-family="Sana" data-search-kind="image">Sana</button><button class="small-button" data-search-family="HunyuanVideo" data-search-kind="video">Hunyuan Video</button><button class="small-button" data-search-family="LTX-2" data-search-kind="video">LTX-2</button><button class="small-button" data-search-family="Cosmos" data-search-kind="video">Cosmos</button></div><div class="search-row"><input id="search-input" placeholder="نام مدل را بنویس یا خالی بگذار"/><button id="search-button" data-work>${icon('Search', 17)} جست‌وجو</button></div><div class="engine-update"><button id="update-engine" class="small-button" data-work>به‌روزرسانی موتور Diffusers</button><span id="engine-status">برای پشتیبانی از کلاس‌های تازه، موتور را به‌روز کن.</span></div><button id="resume-download" class="small-button" type="button">ادامهٔ دانلود ناتمام</button><p class="search-note" id="search-note">مدل‌های تک‌فایلِ پشتیبانی‌شده با موتور و فایل‌های لازم نصب می‌شوند. بسته‌ها ممکن است ۱۰ تا ۲۰ گیگابایت باشند.</p><div id="download-progress" class="download-progress hidden" role="status"><div class="download-head"><strong id="download-name"></strong><b id="download-percent">۰٪</b></div><div id="download-phase" class="download-phase">در حال آماده‌سازی...</div><div class="download-track"><div id="download-fill"></div></div><div class="download-stats"><span id="download-processed">فایل‌ها: ۰ B</span><span id="download-received">دریافت از اینترنت: ۰ B</span><span id="download-speed">سرعت میانگین: ۰ B/ثانیه</span></div><button id="cancel-download" class="cancel-download" type="button">لغو دانلود</button></div><div id="search-results" class="search-results"><div class="search-placeholder">برای دیدن مدل‌ها، جست‌وجو کن.</div></div></div></div></section>
+        <section class="view" id="voice-view"><div class="voice-hero"><span class="eyebrow">VOICE STUDIO</span><h1>ساخت صدا</h1><p>زبان را جست‌وجو کن، مدل گفتار را نصب کن و صدای خودت را بساز.</p><div class="voice-bars"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div></div><div class="voice-layout"><div class="voice-card"><h2>ساخت گفتار</h2><label for="voice-text">متنی که خوانده شود</label><textarea maxlength="500" id="voice-text" placeholder="متن فارسی یا زبان انتخابی را اینجا بنویس..."></textarea><label for="voice-model-select">مدل نصب‌شده و زبان</label><select id="voice-model-select"></select><button id="refresh-installed-voices" class="small-button">بازخوانی مدل‌های نصب‌شده</button><div id="installed-voices" class="installed-voices"></div><button id="voice-generate" class="primary-button">ساخت صدا</button><button id="voice-stop" class="small-button" hidden>توقف ساخت یا دانلود صدا</button><p id="voice-status">صدا در پوشهٔ خروجی ذخیره می‌شود.</p><div id="voice-player" class="voice-player">صدای ساخته‌شده اینجا پخش می‌شود.</div></div><div class="voice-card"><h2>جست‌وجوی مدل صدا</h2><p id="voice-folder"></p><button class="small-button" id="voice-change-folder">تغییر پوشهٔ دانلود مدل‌ها</button><p>نام زبان را فارسی، انگلیسی یا با کد سه‌حرفی بنویس.</p><div class="search-row"><input id="voice-search-input" value="فارسی" placeholder="زبان"/><button id="voice-search-button">جست‌وجو</button></div><button id="persian-voice-search" class="small-button">مدل‌های فارسی</button><button id="popular-voice-search" class="small-button">مدل‌های محبوب</button><div id="voice-search-results"></div></div></div></section><section class="view" id="audio-gallery-view"><div class="section-head"><span class="eyebrow">SOUND LIBRARY</span><h1>گالری صدا</h1><p>صداهای ساخته‌شده و متن هر کدام اینجاست.</p></div><div id="voice-gallery" class="voice-gallery"></div></section><section class="view" id="models-view"><div class="section-head"><span class="eyebrow">MODEL LIBRARY</span><h1>مدل‌ها و جست‌وجو<span>.</span></h1><p>مدل‌های ذخیره‌شده را انتخاب کن یا مدل جدیدی در Hugging Face پیدا کن.</p></div><div class="kind-tabs"><button class="kind-tab active" data-kind="image">${icon('Images', 16)} مدل‌های تصویر</button><button class="kind-tab" data-kind="video">${icon('Film', 16)} مدل‌های ویدیو</button><button class="kind-tab" id="voice-model-tab">${icon('Mic2', 16)} مدل‌های صدا</button></div><div class="model-layout"><div class="model-card"><div class="card-heading"><div>${icon('HardDrive')}<h2>مدل‌های روی سیستم</h2></div><button class="icon-button" id="refresh-models" title="به‌روزرسانی">${icon('RefreshCw')}</button></div><div id="local-models" class="model-list"></div><div class="cache-settings"><div class="cache-head">${icon('Cpu', 17)} <b>مدل‌ها در حافظه</b></div><label class="memory-toggle"><input id="keep-models-loaded" type="checkbox" ${keepLoaded ? 'checked' : ''}/> مدل‌های قبلی در رم بمانند</label><p>با روشن‌بودن این گزینه، جابه‌جایی دوباره سریع‌تر است؛ مدل‌های غیرفعال از کارت گرافیک به رم منتقل می‌شوند و رم بیشتری می‌گیرند. کنار هر مدل دکمهٔ خروج از حافظه هست.</p><label class="startup-label" for="startup-model">مدل هنگام بازشدن برنامه</label><select id="startup-model" class="startup-select"></select><p>«هیچ‌کدام» یعنی برنامه بدون بارگذاری خودکار مدل باز شود.</p></div><div class="cache-settings"><div class="cache-head">${icon('FolderOpen', 17)} <b>پوشهٔ دانلود مدل‌ها</b></div><div id="model-folder" class="cache-path">در حال بررسی...</div><button id="choose-model-folder" class="small-button" data-work>انتخاب پوشه</button><p>مدل‌های قبلی سر جای خود می‌مانند. دانلودهای جدید به پوشهٔ انتخابی می‌روند.</p></div><div class="cache-settings"><div class="cache-head">${icon('FolderOpen', 17)} <b>پوشهٔ ذخیرهٔ عکس و ویدیو</b></div><div id="output-folder" class="cache-path">در حال بررسی...</div><button id="choose-output-folder" class="small-button" data-work>تغییر پوشه</button><p>فایل‌های قبلی در پوشهٔ قبلی می‌مانند؛ فایل‌های جدید در پوشهٔ انتخابی ذخیره می‌شوند.</p></div><div class="cache-settings"><div class="cache-head">${icon('HardDrive', 17)} <b>فضای استفاده‌شده</b></div><div class="storage-stats"><div>مدل‌های دانلودشده <strong id="models-size">...</strong></div><div>عکس‌ها <strong id="images-size">...</strong></div><div>ویدیوها <strong id="videos-size">...</strong></div></div><button id="refresh-storage" class="small-button">به‌روزرسانی حجم‌ها</button></div></div><div class="model-card search-card"><div class="card-heading"><div>${icon('Search')}<h2>جست‌وجوی Hugging Face</h2></div></div><div class="featured-model"><div class="featured-badge">مدل پیشنهادی · تصویر انیمه</div><strong>Animagine XL 3.1</strong><span>cagliostrolab/animagine-xl-3.1</span><p>نسخهٔ SDXL برای تصویرهای انیمه. فقط فایل‌های لازم برای اجرا دانلود می‌شوند؛ حدود ۷ گیگابایت فضا لازم است.</p><button id="featured-animagine" class="small-button" data-work>دانلود مدل</button></div><div class="featured-model featured-lora"><div class="featured-badge">LoRA · نیازمند مدل پایه</div><strong>Qwen Image 2.1 Omni LoRA</strong><span>chatrlabs/Qwen-Image-2.1-Uncensored-Omni-LoRA-v0.1</span><p>فایل LoRA حدود ۶۷۱ مگابایت است. برای ساخت تصویر باید مدل پایهٔ Qwen/Qwen-Image-2.1 جداگانه نصب شود.</p><button id="featured-qwen-lora" class="small-button" data-work>دانلود LoRA</button></div><div class="featured-model featured-gguf"><div class="featured-badge">GGUF · نیازمند موتور دیگر</div><strong>Qwen Image 2.1 Turbo Uncensored GGUF</strong><span>AtomicChat/Qwen-Image-2.1-Turbo-Uncensored-GGUF</span><p>این مخزن رمزگذار متن GGUF است. با «نصب با موتور»، فایل تصویرساز، VAE و موتور stable-diffusion.cpp نیز خودکار دریافت می‌شوند؛ مجموع دانلود حدود ۱۰ گیگابایت است و فقط با کلیک شما شروع می‌شود.</p><button id="featured-gguf" class="small-button" data-work>نصب با موتور</button></div><div class="hf-auth"><b>دسترسی Hugging Face برای مدل‌های محدود</b><p>اگر صفحهٔ مدل از تو پذیرش شرایط می‌خواهد، ابتدا در سایت Hugging Face تأییدش کن، سپس توکن خواندن خودت را اینجا وارد کن.</p><input id="hf-token" type="password" placeholder="HF read token" autocomplete="off"/><button id="hf-login" class="small-button">ورود با توکن</button><span id="hf-auth-status"></span></div><div class="featured-model"><div class="featured-badge">FLUX · مدل تصویرساز</div><strong>FLUX.1 Schnell و Dev</strong><p>مدل کامل با Diffusers اجرا می‌شود. نسخه‌های GGUF از city96 و leejet با موتور stable-diffusion.cpp و فایل‌های CLIP-L، T5-XXL و VAE نصب می‌شوند؛ ابتدا بررسی حجم را بزن.</p><button id="flux-search" class="small-button">پیداکردن FLUX</button><button id="flux-gguf-search" class="small-button">FLUX GGUF · موتور CPU و CUDA</button><button id="flux-free" class="small-button">FLUX.1 Schnell بدون مجوز ویژه · حدود ۵۴ GB</button></div><div class="search-presets"><button id="favorites-filter" class="small-button">☆ فقط علاقه‌مندی‌ها</button><button id="uncensored-search" class="small-button">مدل‌های Uncensored</button><span>تا ۵۰۰ نتیجه؛ با دکمهٔ «نمایش بیشتر»</span></div><div class="engine-presets"><button class="small-button" data-search-family="Qwen-Image" data-search-kind="image">Qwen Image</button><button class="small-button" data-search-family="FLUX" data-search-kind="image">FLUX</button><button class="small-button" data-search-family="Sana" data-search-kind="image">Sana</button><button class="small-button" data-search-family="HunyuanVideo" data-search-kind="video">Hunyuan Video</button><button class="small-button" data-search-family="LTX-2" data-search-kind="video">LTX-2</button><button class="small-button" data-search-family="Cosmos" data-search-kind="video">Cosmos</button></div><div class="search-row"><input id="search-input" placeholder="نام مدل را بنویس یا خالی بگذار"/><button id="search-button" data-work>${icon('Search', 17)} جست‌وجو</button></div><div class="engine-update"><button id="update-engine" class="small-button" data-work>به‌روزرسانی موتور Diffusers</button><span id="engine-status">برای پشتیبانی از کلاس‌های تازه، موتور را به‌روز کن.</span></div><p class="search-note" id="search-note">مدل‌های تک‌فایلِ پشتیبانی‌شده با موتور و فایل‌های لازم نصب می‌شوند. بسته‌ها ممکن است ۱۰ تا ۲۰ گیگابایت باشند.</p><div id="search-results" class="search-results"><div class="search-placeholder">برای دیدن مدل‌ها، جست‌وجو کن.</div></div></div></div></section>
         <section class="view" id="website-view"><div class="section-head"><span class="eyebrow">REMOTE STUDIO</span><h1>وب‌سایت تصویرسازی</h1><p>سرور را روشن کن تا دوستانت با نام کاربری و رمز وارد شوند، مدل انتخاب کنند و عکس بسازند.</p></div><div class="website-grid"><div class="model-card"><div class="card-heading"><div>${icon('ExternalLink')}<h2>کنترل سرور</h2></div></div><p id="web-state">خاموش</p><label>پورت <input id="web-port" type="number" min="1024" max="65535" value="8765"/></label><div class="website-actions"><button id="web-start" class="primary-button">روشن‌کردن وب‌سایت</button><button id="web-stop" class="small-button">خاموش‌کردن</button></div><div class="website-actions"><button id="web-public-start" class="small-button">بازکردن دسترسی عمومی امن</button><button id="web-public-stop" class="small-button">بستن دسترسی عمومی</button></div><p>با کلیک، ابزار Cloudflare Tunnel در صورت نیاز دانلود می‌شود و یک نشانی HTTPS موقت می‌دهد. نام کاربری و رمز همچنان لازم است.</p><div class="web-address"><b>آدرس عمومی HTTPS</b><code id="web-tunnel">—</code><b>آدرس خصوصی</b><code id="web-private">—</code><b>آی‌پی اینترنت · صرفاً اطلاعات شبکه</b><code id="web-public">—</code><b>پوشهٔ جداگانهٔ گالری وب</b><code id="web-gallery-path">—</code></div><p>برای دسترسی از راه دور، لینک HTTPS را بفرست. تونل اتصال خروجی می‌سازد و معمولاً نیازی به دسترسی مدیر یا بازکردن پورت روتر ندارد. آی‌پی خام پشت NAT یا اینترنت اشتراکی ممکن است از بیرون باز نشود. آی‌پی عمومی خام فقط وقتی کار می‌کند که پورت روی روتر تنظیم شده باشد؛ بدون HTTPS از آن برای ورود کاربران استفاده نکن.</p><label>حداقل رم آزاد سیستم (GB) <input id="web-free-ram" type="number" min="0" max="512" step="0.5" value="2"/></label><button id="web-save-settings" class="small-button">ذخیرهٔ حد رم آزاد</button><p>درخواست وب وقتی رم آزاد کمتر از این مقدار باشد رد می‌شود. این تنظیم سقف مصرف رم نیست؛ موتور ساخت عکس با خود برنامه مشترک است.</p></div><div class="model-card"><div class="card-heading"><div>${icon('Blocks')}<h2>کاربران و سهمیه‌ها</h2></div></div><label>نام کاربر <input id="web-user-name" maxlength="40" placeholder="مثلاً ali"/></label><label>رمز عبور (حداقل ۸ نویسه) <input id="web-user-password" type="password" autocomplete="new-password"/></label><label>تعداد عکس در روز <input id="web-user-quota" type="number" min="1" max="10000" value="10"/></label><button id="web-add-user" class="primary-button">ساخت کاربر</button><p id="web-new-token"></p><div id="web-users"></div><p>کاربران با نام و رمز وارد می‌شوند. رمز در برنامه به صورت هش ذخیره می‌شود؛ اگر فراموش شد، رمز تازه تعیین کن.</p></div></div></section><section class="view" id="gallery-view"><div class="section-head"><span class="eyebrow">YOUR COLLECTION</span><h1>گالری تصاویر</h1><p>تمام تصویرهایی که با برنامه ساخته‌ای، همین‌جا نگهداری می‌شوند.</p><div class="gallery-search"><input id="gallery-query" placeholder="جست‌وجوی پرامپت، مدل یا برچسب"/><input id="gallery-from" type="date" title="از تاریخ"/><input id="gallery-to" type="date" title="تا تاریخ"/><button id="gallery-set-pin" class="small-button">قفل گالری</button></div><select id="gallery-model-filter" class="gallery-filter" aria-label="دسته‌بندی بر اساس مدل"><option value="">همهٔ مدل‌ها</option></select><label class="gallery-details-toggle"><input id="gallery-details-toggle" type="checkbox" ${showGalleryDetails ? 'checked' : ''}/> نمایش پرامپت و مدل زیر عکس‌ها</label><label class="gallery-details-toggle"><input id="gallery-favorites-filter" type="checkbox"/> فقط عکس‌های محبوب</label></div><div id="full-gallery" class="full-gallery"></div></section>
       </main>
     </div>${projectDialog}${matrixDialog}<aside id="image-ready-notice" class="image-ready-notice" hidden><span class="image-notice-icon">${icon('Check', 18)}</span><p role="status"></p><button class="small-button" data-notice-open>مشاهدهٔ نتیجه</button><button class="icon-button" id="dismiss-image-notice" title="بستن اعلان" aria-label="بستن اعلان">${icon('X', 15)}</button></aside><div id="setup-overlay" class="setup-overlay hidden"><div class="setup-card"><div class="brand-mark"><img src="${brandIcon}" alt=""/></div><span class="eyebrow">FIRST RUN SETUP</span><h1>آماده‌سازی اولیه</h1><p>برنامه پیش‌نیازها را بررسی می‌کند و فقط مواردِ نصب‌نشده را دریافت می‌کند. نصب مدل‌های هوش مصنوعی جداگانه و به انتخاب شماست.</p><div class="setup-items"><div>✓ WebView2 آماده است</div><div id="setup-python">در حال بررسی Python...</div><div id="setup-packages">در حال بررسی بسته‌ها...</div></div><div id="setup-message" class="setup-message">در حال بررسی...</div><button id="setup-retry" class="primary-button" hidden>تلاش دوباره</button></div></div><div id="gallery-lock" class="gallery-lock hidden"><div><h2>گالری قفل است</h2><input id="gallery-pin-input" type="password" inputmode="numeric" placeholder="رمز گالری"/><button id="gallery-unlock" class="primary-button">${icon('LockKeyhole', 16)} باز کردن گالری</button><button id="gallery-lock-close" class="small-button">بستن</button><p id="gallery-lock-error"></p></div></div><div id="viewer-modal" class="modal hidden"><div class="viewer-toolbar"><button id="close-modal" class="modal-close">${icon('X')}</button><span id="modal-caption"></span><button id="viewer-reuse-prompt" class="small-button" hidden>${icon('WandSparkles', 15)} <span>ساخت نسخهٔ تازه</span></button><button type="button" id="viewer-versions" class="small-button" hidden>نسخه‌های مرتبط</button><button id="viewer-zoom-out" class="icon-button" title="کوچک‌نمایی">−</button><button id="viewer-zoom-in" class="icon-button" title="بزرگ‌نمایی">+</button><button id="viewer-save" class="icon-button" title="دانلود عکس">${icon('Download')}</button></div><div class="viewer-image-wrap"><img id="modal-image" alt="تصویر ساخته‌شده"/></div></div>`;
@@ -648,8 +629,20 @@ function render() {
   mountWorkspacePreferences({ setCompact: setCompactNavigation, go: openWorkspace, translate: text => language === 'en' ? english[text] || text : text });
   document.querySelector('[data-settings-tab="storage"]')!.addEventListener('click', () => void refreshStorage());
   restoreStudioDraft();
-  mountChat({ call, busy: () => busy, setBusy, view: setView, symbol: icon('Sparkles', 20) });
-  mountLibrary({ busy: () => busy, view: setView, searchImage: searchModels, searchVoice: searchVoices, symbol: kind => icon(kind === 'image' ? 'Images' : kind === 'video' ? 'Film' : kind === 'voice' ? 'Mic2' : 'Sparkles', 19) });
+  downloadCenter = mountDownloadCenter({
+    available: () => downloadsReady, english: () => language === 'en', busy: () => busy,
+    plan: async (request, variant) => {
+      if (request.kind === 'voice') return call<DownloadPlan>('tts_info', { model_id: request.id });
+      if (request.kind === 'chat') return call<DownloadPlan>('chat_download_plan', { ...request.payload, size: request.size });
+      return call<DownloadPlan>('info', { model_id: request.id, kind: request.kind, variant });
+    },
+    run: runDownload, stop: job => invoke<boolean>('cancel_model_download', { jobId: job.key }),
+    partials: (job, expected) => call(expected == null ? 'download_parts_info' : 'download_parts_delete',
+      { model_id: job.id, kind: job.kind, folder: job.folder, revisions: job.payload.revisions, expected_bytes: expected }),
+    open: openDownloaded, error: message => toast(message, true),
+  });
+  mountChat({ call, queueDownload: (id, payload, size) => downloadCenter.preview({ id, kind: 'chat', payload, size }), busy: () => busy, setBusy, view: setView, symbol: icon('Sparkles', 20) });
+  mountLibrary({ downloads: downloadCenter.show, busy: () => busy, view: setView, searchImage: searchModels, searchVoice: searchVoices, symbol: kind => icon(kind === 'image' ? 'Images' : kind === 'video' ? 'Film' : kind === 'voice' ? 'Mic2' : 'Sparkles', 19) });
   refreshIcons();
   applyLanguage();
   observeInterfaceLanguage();
@@ -806,9 +799,13 @@ function renderSearch() {
   target.innerHTML = filters + (results.length ? results.slice(0, searchVisibleCount).map(m => {
     const inspection = inspections.get(m.id);
     const kind = inspection ? inspection.download_kind : (m.category === 'image' || m.category === 'video' || m.category === 'sdcpp' || m.category === 'checkpoint' || (m.category === 'adapter' && m.id === featuredQwenLora) ? m.category : null);
-    const downloadable = !(inspection?.gated ?? m.gated) && !!kind;
+    const gated = inspection?.gated ?? m.gated;
+    const downloadable = !gated && !!kind;
     const installed = models.includes(m.id) || videoModels.includes(m.id) || sdcppModels.includes(m.id) || checkpointModels.includes(m.id) || adapters.includes(m.id);
-    return `<div class="search-result" data-model-id="${safe(m.id)}"><button class="favorite-button ${favoriteModels.has(m.id) ? 'is-favorite' : ''}" data-favorite="${safe(m.id)}" title="علاقه‌مندی">${icon('Star', 17)}</button><div class="model-symbol">${icon(m.category === 'video' ? 'Film' : 'Aperture', 19)}</div><div class="search-meta"><strong>${safe(m.id)}</strong><small>${safe(labels[m.category])} · ${m.downloads.toLocaleString('fa-IR')} دانلود</small></div><span class="size-label">${inspections.get(m.id)?.size_gb == null ? 'حجم: بررسی نشده' : `حجم: ${inspections.get(m.id)!.size_gb!.toLocaleString('fa-IR')} GB`}</span><button class="small-button inspect-button" data-inspect="${safe(m.id)}">${inspection ? 'بررسی دوباره' : 'بررسی'}</button><button class="small-button download-button" data-download="${safe(m.id)}" data-kind="${kind || m.category}" data-static-disabled="${downloadable && !installed ? '0' : '1'}" data-work ${downloadable && !installed ? '' : 'disabled'}>${installed ? 'نصب شده' : (m.gated && inspection?.gated !== false) ? 'دسترسی محدود' : kind === 'sdcpp' ? 'نصب با موتور' : downloadable ? 'دانلود' : inspection ? 'پشتیبانی نمی‌شود' : 'نیازمند بررسی'}</button>${inspection?.checkpoint_available && kind !== 'checkpoint' ? `<button class="small-button" data-checkpoint-download="${safe(m.id)}" data-work ${checkpointModels.includes(m.id) ? 'disabled' : ''}>${checkpointModels.includes(m.id) ? 'تک‌فایل نصب شده' : 'دریافت نسخهٔ تک‌فایل'}</button>` : ''}<div class="inspection-details">${modelPreflight(inspection)}</div></div>`;
+    const canPreview = gated || (downloadable && (!installed || kind === 'sdcpp'));
+    const downloadLabel = gated ? 'جزئیات دسترسی' : installed ? (kind === 'sdcpp' ? 'انتخاب نسخهٔ دیگر' : 'نصب شده')
+      : kind === 'sdcpp' ? 'نصب با موتور' : downloadable ? 'بررسی و دانلود' : inspection ? 'پشتیبانی نمی‌شود' : 'نیازمند بررسی';
+    return `<div class="search-result" data-model-id="${safe(m.id)}"><button class="favorite-button ${favoriteModels.has(m.id) ? 'is-favorite' : ''}" data-favorite="${safe(m.id)}" title="علاقه‌مندی">${icon('Star', 17)}</button><div class="model-symbol">${icon(m.category === 'video' ? 'Film' : 'Aperture', 19)}</div><div class="search-meta"><strong>${safe(m.id)}</strong><small>${safe(labels[m.category])} · ${m.downloads.toLocaleString('fa-IR')} دانلود</small></div><span class="size-label">${inspections.get(m.id)?.size_gb == null ? 'حجم: بررسی نشده' : `حجم: ${inspections.get(m.id)!.size_gb!.toLocaleString('fa-IR')} GB`}</span><button class="small-button inspect-button" data-inspect="${safe(m.id)}">${inspection ? 'بررسی دوباره' : 'بررسی'}</button><button class="small-button download-button" data-download="${safe(m.id)}" data-kind="${kind || m.category}" data-static-disabled="${canPreview ? '0' : '1'}" data-work ${canPreview ? '' : 'disabled'}>${downloadLabel}</button>${inspection?.checkpoint_available && kind !== 'checkpoint' ? `<button class="small-button" data-checkpoint-download="${safe(m.id)}" data-work ${checkpointModels.includes(m.id) ? 'disabled' : ''}>${checkpointModels.includes(m.id) ? 'تک‌فایل نصب شده' : 'دریافت نسخهٔ تک‌فایل'}</button>` : ''}<div class="inspection-details">${modelPreflight(inspection)}</div></div>`;
   }).join('') + (results.length > searchVisibleCount ? `<button id="more-models" class="small-button more-models">نمایش بیشتر · ${Math.min(results.length - searchVisibleCount, 80).toLocaleString('fa-IR')} مدل دیگر از ${results.length.toLocaleString('fa-IR')}</button>` : `<p class="search-total">${results.length.toLocaleString('fa-IR')} مدل نمایش داده شد</p>`) : '<div class="search-placeholder">مدلی در این دسته پیدا نشد.</div>');
   target.querySelector<HTMLButtonElement>('#more-models')?.addEventListener('click', () => { searchVisibleCount += 80; renderSearch(); });
   target.querySelectorAll<HTMLButtonElement>('[data-result-category]').forEach(button => button.onclick = () => { searchCategoryFilter = button.dataset.resultCategory as typeof searchCategoryFilter; searchVisibleCount = 80; renderSearch(); });
@@ -1261,8 +1258,9 @@ function pauseSnake() {
 
 async function chooseModelFolder() {
   if (busy) return;
+  if (downloadCenter.running()) return toast(language === 'en' ? 'Pause the active download before changing the folder.' : 'پیش از تغییر پوشه، دانلود جاری را مکث کن.', true);
   const selected = await open({ directory: true, multiple: false, title: 'پوشهٔ دانلود مدل‌ها را انتخاب کن' });
-  if (typeof selected !== 'string') return;
+  if (typeof selected !== 'string' || downloadCenter.running()) return;
   setBusy(true, 'در حال تغییر پوشهٔ مدل‌ها...');
   try {
     await invoke('set_model_folder', { path: selected });
@@ -1375,7 +1373,7 @@ async function editImage() {
   studioPreview = 'running';
   renderStudioPreview();
   try {
-    const result = await call<{ name: string; image: string; translated: string; model: string; temporary: boolean }>('edit_image', { prompt, image: editSourceImage, ...metadata, temporary: temporaryImage });
+    const result = await call<{ name: string; image: string; translated: string; model: string; temporary: boolean }>('edit_image', { prompt, image: editSourceImage, mask_image: editMaskImage || undefined, ...metadata, temporary: temporaryImage });
     currentImageMetadata = { ...metadata, model: result.model };
     currentImage = result.image; currentImageName = result.name; currentImageTemporary = result.temporary;
     currentImagePrompt = prompt;
@@ -1424,67 +1422,65 @@ async function searchModels(imageOnly = false) {
   finally { setBusy(false); }
 }
 
-async function downloadModel(id: string, kind = modelKind) {
-  if (busy) return;
-  localStorage.setItem('nocturne-pending-download', JSON.stringify({ id, kind }));
-  cancellingDownload = false;
-  const panel = document.querySelector<HTMLElement>('#download-progress')!;
-  panel.dataset.model = id;
-  panel.classList.remove('hidden', 'download-failed', 'download-done');
-  document.querySelector('#download-name')!.textContent = id;
-  const cancel = document.querySelector<HTMLButtonElement>('#cancel-download')!;
-  cancel.hidden = false;
-  cancel.disabled = false;
-  cancel.textContent = 'لغو دانلود';
-  document.querySelector('#download-phase')!.textContent = 'در حال آماده‌سازی...';
-  updateDownloadProgress({ model_id: id, processed: 0, received: 0, total: 0, speed: 0 });
-  const idleTimer = window.setInterval(() => {
-    const idle = Math.floor((Date.now() - lastDownloadActivity) / 1000);
-    if (idle >= 15 && !cancellingDownload) document.querySelector('#download-phase')!.textContent = `منتظر پاسخ سرور؛ ${idle.toLocaleString('fa-IR')} ثانیه بدون دادهٔ تازه. اتصال خودکار دوباره امتحان می‌شود.`;
-  }, 1000);
-  setBusy(true, `در حال دانلود ${id}؛ این کار ممکن است چند دقیقه طول بکشد...`);
-  try {
-    await call('download', { model_id: id, kind });
-    const result = await call<{ models: string[]; video_models: string[]; sdcpp_models: string[]; checkpoint_models: string[]; adapters: string[] }>('models');
-    models = result.models;
-    videoModels = result.video_models;
-    sdcppModels = result.sdcpp_models;
-    checkpointModels = result.checkpoint_models;
-    adapters = result.adapters;
-    renderModels();
-    panel.classList.add('download-done');
-    void refreshStorage();
-    document.querySelector('#download-percent')!.textContent = 'کامل';
-    document.querySelector('#download-phase')!.textContent = kind === 'adapter' ? 'LoRA دانلود شد؛ برای اجرا به مدل پایهٔ Qwen/Qwen-Image-2.1 نیاز دارد.' : kind === 'sdcpp' ? 'مدل، موتور و پیش‌نیازها نصب شدند؛ اکنون مدل را انتخاب کن.' : 'دانلود کامل شد و مدل آمادهٔ انتخاب است.';
-    toast(kind === 'adapter' ? 'LoRA دانلود شد. مدل پایهٔ Qwen-Image-2.1 جداگانه لازم است.' : `${id} دانلود شد. اکنون روی «انتخاب» بزن.`);
-    localStorage.removeItem('nocturne-pending-download');
-  } catch (error) {
-    panel.classList.add('download-failed');
-    document.querySelector('#download-percent')!.textContent = cancellingDownload ? 'لغو شد' : 'خطا';
-    document.querySelector('#download-phase')!.textContent = cancellingDownload ? 'دانلود متوقف شد. دوباره می‌توانی ادامه بدهی.' : 'دانلود انجام نشد. پیام خطا را ببین.';
-    toast(String(error), !cancellingDownload);
-  }
-  finally { inspections.delete(id); renderSearch(); window.clearInterval(idleTimer); cancel.hidden = true; cancellingDownload = false; setBusy(false); }
+function downloadModel(id: string, kind = modelKind) {
+  downloadCenter.preview({ id, kind: kind as DownloadKind, payload: {} });
 }
 
-async function cancelDownload() {
-  if (!busy || cancellingDownload) return;
-  cancellingDownload = true;
-  const button = document.querySelector<HTMLButtonElement>('#cancel-download')!;
-  button.disabled = true;
-  button.textContent = 'در حال لغو...';
+async function runDownload(job: DownloadJob, bandwidth: number) {
+  const payload = { ...job.payload, job_id: job.key, model_id: job.id, kind: job.kind, folder: job.folder, bandwidth, device: selectedDevice };
+  async function transfer<T>(action: string) {
+    const response = await invoke<ApiResult<T>>('model_download', { jobId: job.key, action, payload });
+    if (!response.ok) throw new Error(response.error);
+    return response.data;
+  }
   try {
-    const stopped = await invoke<boolean>('cancel_download');
-    if (!stopped) {
-      cancellingDownload = false;
-      button.disabled = false;
-      button.textContent = 'لغو دانلود';
+    if (job.kind === 'voice') {
+      await transfer('tts_download');
+      voiceModels = await call<string[]>('tts_installed');
+      if (!voiceModels.includes(job.id)) throw new Error('Voice files were transferred but the engine could not find a complete model.');
+      renderVoices();
+    } else if (job.kind === 'chat') {
+      const result = await transfer<{ model?: string }>('chat_pull');
+      if (!result.model) throw new Error('Downloaded chat model could not be registered.');
+      job.payload.installedModel = result.model;
+      document.dispatchEvent(new CustomEvent('nocturne-chat-installed', { detail: result.model }));
+    } else {
+      await transfer('download');
+      const result = await call<Pick<Status, 'models' | 'video_models' | 'sdcpp_models' | 'checkpoint_models' | 'adapters'>>('models');
+      models = result.models;
+      videoModels = result.video_models;
+      sdcppModels = result.sdcpp_models;
+      checkpointModels = result.checkpoint_models;
+      adapters = result.adapters;
+      const installed = { image: models, video: videoModels, sdcpp: sdcppModels, checkpoint: checkpointModels, adapter: adapters };
+      if (!installed[job.kind].includes(job.id)) throw new Error('Files were transferred, but the model did not pass the readiness check.');
+      renderModels();
+      renderQueue();
+      return job.kind === 'adapter' ? 'dependency' : 'ready';
     }
-  } catch (error) {
-    cancellingDownload = false;
-    button.disabled = false;
-    button.textContent = 'لغو دانلود';
-    toast(String(error), true);
+    return 'ready';
+  } finally {
+    inspections.delete(job.id);
+    renderSearch();
+  }
+}
+
+function openDownloaded(job: DownloadJob) {
+  if (job.kind === 'chat') {
+    setView('chat');
+    const selected = job.payload.installedModel;
+    if (typeof selected === 'string') document.dispatchEvent(new CustomEvent('nocturne-chat-installed', { detail: selected }));
+  } else if (job.kind === 'voice') {
+    setView('voice');
+    const select = document.querySelector<HTMLSelectElement>('#voice-model-select')!;
+    if (voiceModels.includes(job.id)) {
+      select.value = job.id;
+      select.dispatchEvent(new Event('change'));
+    }
+  } else if (job.kind !== 'adapter') {
+    setView(job.kind === 'video' ? 'video' : 'studio');
+    if (job.kind !== 'video' && /kontext|flux[.-]?1.*(?:fill|canny|depth|redux)/i.test(job.id)) setStudioMode('edit');
+    if (!busy) void loadModel(job.id, job.kind, false);
   }
 }
 
@@ -1576,27 +1572,15 @@ async function inspectVoice(id: string) {
   } catch (error) { target.textContent = String(error); toast(String(error), true); }
 }
 
-async function downloadVoice(id: string) {
-  if (voiceModels.includes(id)) { const select = document.querySelector<HTMLSelectElement>('#voice-model-select')!; select.value = id; localStorage.setItem('nocturne-selected-voice', id); document.querySelector('#voice-status')!.textContent = `${id} آمادهٔ ساخت است.`; return; }
-  if (busy) return;
-  activeVoiceDownload = id;
-  document.querySelector<HTMLElement>('#voice-stop')!.hidden = false;
-  setBusy(true, `در حال دانلود مدل صدای ${id}...`);
-  document.querySelector('#voice-status')!.textContent = `در حال دریافت ${id}...`;
-  document.querySelector<HTMLElement>('#voice-download-progress')!.hidden = false;
-  document.querySelector<HTMLElement>('#voice-download-track')!.style.width = '0%';
-  document.querySelector<HTMLElement>('#voice-download-stats')!.textContent = 'در حال اتصال...';
-  try {
-    await call('tts_download', { model_id: id });
-    voiceModels = await call('tts_installed');
-    renderVoices(); await searchVoices();
-    document.querySelector('#voice-status')!.textContent = `${id} آماده است.`;
-    toast('مدل صدا نصب شد.');
-  } catch (error) {
-    document.querySelector('#voice-status')!.textContent = `دانلود مدل صدا ناموفق بود: ${String(error)}`;
-    toast(String(error), true);
+function downloadVoice(id: string) {
+  if (voiceModels.includes(id)) {
+    const select = document.querySelector<HTMLSelectElement>('#voice-model-select')!;
+    select.value = id;
+    select.dispatchEvent(new Event('change'));
+    setView('voice');
+    return;
   }
-  finally { activeVoiceDownload = null; document.querySelector<HTMLElement>('#voice-stop')!.hidden = true; setBusy(false); }
+  downloadCenter.preview({ id, kind: 'voice', payload: {} });
 }
 
 async function generateVoice() {
@@ -1701,6 +1685,8 @@ function restoreStudioDraft() {
 }
 
 function setEditSource(image: string) {
+  editMaskImage = '';
+  document.querySelector<HTMLInputElement>('#edit-mask')!.value = '';
   editSourceImage = image;
   const preview = document.querySelector<HTMLImageElement>('#edit-source-preview')!;
   if (image) preview.src = image;
@@ -2001,6 +1987,22 @@ function attachEvents() {
     const file = (event.target as HTMLInputElement).files?.[0];
     if (file) void uploadReference(file);
   };
+  document.querySelector<HTMLInputElement>('#edit-mask')!.onchange = event => {
+    const input = event.target as HTMLInputElement;
+    const file = input.files?.[0];
+    editMaskImage = '';
+    if (!file) return;
+    if (!['image/png', 'image/jpeg', 'image/webp'].includes(file.type) || file.size > 20 * 1024 ** 2) {
+      input.value = '';
+      toast('فقط PNG، JPEG یا WebP تا ۲۰ مگابایت پذیرفته می‌شود.', true);
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => { if (input.files?.[0] === file) editMaskImage = String(reader.result); };
+    reader.onerror = () => toast('خواندن عکس ناموفق بود.', true);
+    reader.readAsDataURL(file);
+  };
+
   document.querySelector<HTMLButtonElement>('#hf-login')!.onclick = async () => { const input = document.querySelector<HTMLInputElement>('#hf-token')!; try { await call('hf_login', { token: input.value }); input.value = ''; document.querySelector('#hf-auth-status')!.textContent = 'حساب متصل شد. مدل را دوباره بررسی کن.'; toast('ورود Hugging Face انجام شد.'); } catch (error) { input.value = ''; toast(String(error), true); } };
   document.querySelector<HTMLButtonElement>('#flux-search')!.onclick = () => { setView('models'); document.querySelector<HTMLInputElement>('#search-input')!.value = 'FLUX'; void searchModels(true); };
   document.querySelector<HTMLButtonElement>('#flux-free')!.onclick = () => { setView('models'); document.querySelector<HTMLInputElement>('#search-input')!.value = 'unsloth/FLUX.1-schnell'; void searchModels(true); };
@@ -2014,7 +2016,6 @@ function attachEvents() {
     document.querySelector<HTMLInputElement>(`#${id}`)!.onchange = event => { const checked = (event.target as HTMLInputElement).checked; localStorage.setItem(key, checked ? '1' : '0'); if (id === 'hide-recent') hideRecent = checked; else if (id === 'hide-compare') hideCompare = checked; else hideGallery = checked; applyPrivacy(); };
   }
   document.querySelector<HTMLButtonElement>('#privacy-cover-button')!.onclick = () => { privacyCover = !privacyCover; applyPrivacy(); };
-  document.querySelector<HTMLButtonElement>('#resume-download')!.onclick = () => { const saved = localStorage.getItem('nocturne-pending-download'); if (!saved) return toast('دانلود ناتمامی ثبت نشده است.', true); try { const { id, kind } = JSON.parse(saved); void downloadModel(id, kind); } catch { toast('اطلاعات دانلود ناتمام معتبر نیست.', true); } };
   document.querySelector<HTMLButtonElement>('#compare-start')!.onclick = () => void compareModels();
   document.querySelector<HTMLInputElement>('#gallery-query')!.oninput = event => {
     galleryQuery = (event.target as HTMLInputElement).value.trim();
@@ -2049,7 +2050,7 @@ function attachEvents() {
     applyTheme(selected);
     localStorage.setItem('nocturne-theme', selected);
   };
-  document.querySelector<HTMLSelectElement>('#language-select')!.onchange = event => { language = (event.target as HTMLSelectElement).value; localStorage.setItem('nocturne-language', language); applyLanguage(); };
+  document.querySelector<HTMLSelectElement>('#language-select')!.onchange = event => { language = (event.target as HTMLSelectElement).value; localStorage.setItem('nocturne-language', language); applyLanguage(); downloadCenter.render(); };
   document.querySelectorAll<HTMLButtonElement>('[data-view]').forEach(el => el.onclick = () => setView(el.dataset.view!));
   document.querySelectorAll<HTMLButtonElement>('[data-kind]').forEach(el => el.onclick = () => {
     modelKind = el.dataset.kind!;
@@ -2144,7 +2145,6 @@ function attachEvents() {
   document.querySelector<HTMLButtonElement>('#featured-qwen-lora')!.onclick = () => {
     if (!adapters.includes(featuredQwenLora)) void downloadModel(featuredQwenLora, 'adapter');
   };
-  document.querySelector<HTMLButtonElement>('#cancel-download')!.onclick = cancelDownload;
   document.querySelector<HTMLInputElement>('#search-input')!.onkeydown = event => { if (event.key === 'Enter') searchModels(); };
   document.querySelector<HTMLButtonElement>('#favorites-filter')!.onclick = () => { showFavoritesOnly = !showFavoritesOnly; document.querySelector('#favorites-filter')!.textContent = showFavoritesOnly ? '★ نمایش همه' : '☆ فقط علاقه‌مندی‌ها'; renderModels(); renderSearch(); };
   document.querySelector<HTMLButtonElement>('#refresh-models')!.onclick = async () => { const data = await call<{ models: string[]; video_models: string[]; sdcpp_models: string[]; checkpoint_models: string[]; adapters: string[]; loaded_models: LoadedModel[] }>('models'); models = data.models; videoModels = data.video_models; sdcppModels = data.sdcpp_models;
@@ -2221,7 +2221,9 @@ async function initialize() {
   if (initialPage === 'home') setView('home');
   showStartup('prerequisites', Boolean(startupModel));
   await listen<{ message: string }>('setup-progress', event => { const el = document.querySelector('#setup-message'); if (el) el.textContent = event.payload.message; });
-  await listen<DownloadProgress>('download-progress', event => updateDownloadProgress(event.payload));
+  await listen<Transfer>('download-progress', event => downloadCenter.progress(event.payload));
+  await listen<{ job_id?: string; status?: string; completed?: number; total?: number }>('chat-progress', ({ payload }) =>
+    downloadCenter.progress({ model_id: '', job_id: payload.job_id, file: payload.status, processed: payload.completed, total: payload.total }, true));
   await listen<{ phase: string; row: number; model_id: string; row_completed: number; row_total: number; completed: number; total: number; name?: string }>('queue-progress', event => {
     if (!queueRunning) return;
     const p = event.payload;
@@ -2302,6 +2304,8 @@ async function boot() {
     rendered = true;
     await initialize();
     hideStartup();
+    downloadsReady = true;
+    void downloadCenter.drain();
     void refreshReferences();
   } catch (error) {
     if (rendered) setBusy(false);

@@ -31,6 +31,16 @@ Version 2.0 introduces a new app icon, a graphite-and-peach theme and a home scr
 
 ![Previewing prompt, model and aspect-ratio combinations](docs/screenshots/combinations.png)
 
+## Downloads and FLUX
+
+Open **Downloads** in the top bar for the shared image, video, speech and chat queue. Review a package from its library card to see the selected files and known disk usage. Pause keeps partial files. The app restores queued downloads after a restart, and retries connection failures with a countdown. A finished transfer becomes ready after the runtime recognizes the installation. Use **Verify and repair** to check supported image and video packages, or explicitly clear an incomplete transfer's private partial files.
+
+Set one or two simultaneous transfers. Downloads with a shared engine are queued in order, and the optional speed limit applies to direct file transfers. Ollama and Hub-managed chat files follow their own engine and cache behavior.
+
+The Windows stable-diffusion.cpp route supports GGUF packages for FLUX.1 Schnell, Dev and Kontext, and FLUX.2 Dev, Klein and Klein Base (4B and 9B). It selects the corresponding VAE and text encoder, and offers the available GGUF variants. Diffusers handles compatible full repositories. In **Edit**, provide a matching black-and-white mask for FLUX Fill or a prepared control image for FLUX Canny/Depth. The **FLUX**, **FLUX.2**, **Uncensored**, and **FLUX Uncensored** shortcuts search Hugging Face. Community uploads still need an identifiable compatible format and any required repository access.
+
+![Review the selected quantization, files, and disk budget before downloading](docs/screenshots/download-preview.png)
+
 ## Install and run
 
 1. Open the latest release and download the Windows x64 installer. For a portable copy, download the ZIP, extract the whole archive and run `nocturne-studio.exe`.
