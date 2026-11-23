@@ -193,6 +193,14 @@ Object.assign(english, {"تنظیمات ساخت دسته‌ای":"Quick batch s
 
 Object.assign(english, additionalTranslations);
 
+const queueLabels = [
+  [/^Job (\d+)$/, "کار $1", /^کار (\d+)$/, "Job $1"],
+  [/^(\d+) jobs$/, "$1 کار", /^(\d+) کار$/, "$1 jobs"],
+  [/^(\d+) \/ (\d+) images$/, "$1 از $2 تصویر", /^(\d+) از (\d+) تصویر$/, "$1 / $2 images"],
+  [/^([\d,]+) \/ ([\d,]+) images generated$/, "$1 از $2 تصویر ساخته شد", /^([\d,]+) از ([\d,]+) تصویر ساخته شد$/, "$1 / $2 images generated"],
+  [/^([\d,]+) images generated$/, "$1 تصویر ساخته شد", /^([\d,]+) تصویر ساخته شد$/, "$1 images generated"],
+] as const;
+
 function applyLanguage() {
   document.documentElement.lang = language;
   document.documentElement.dir = language === 'en' ? 'ltr' : 'rtl';
@@ -204,6 +212,14 @@ function applyLanguage() {
     if (node.parentElement?.closest('#chat-threads, #chat-artifact-code, .cache-path, textarea, .chat-prose, .chat-file-names, .code-box pre, [data-queue-model] option[value]:not([value=""]), #preset-select option:not([value=""])')) continue;
     const original = node.textContent?.trim() || '';
     if (Object.hasOwn(translations, original)) node.textContent = node.textContent!.replace(original, translations[original]);
+    else if (node.parentElement?.matches('.queue-position, .queue-job-progress, #queue-jobs-count, #queue-details')) {
+      for (const [en, faText, fa, enText] of queueLabels) {
+        const pattern = language === 'en' ? fa : en;
+        if (!pattern.test(original)) continue;
+        node.textContent = node.textContent!.replace(original, original.replace(pattern, language === 'en' ? enText : faText));
+        break;
+      }
+    }
   }
   for (const element of app.querySelectorAll<HTMLElement>('[placeholder], [aria-label], [title]')) {
     for (const attribute of ['placeholder', 'aria-label', 'title']) {
