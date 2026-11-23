@@ -640,6 +640,7 @@ function render() {
     partials: (job, expected) => call(expected == null ? 'download_parts_info' : 'download_parts_delete',
       { model_id: job.id, kind: job.kind, folder: job.folder, revisions: job.payload.revisions, expected_bytes: expected }),
     open: openDownloaded, error: message => toast(message, true),
+    notify: message => { void invoke('notify_image_ready', { message }).catch(() => {}); },
   });
   mountChat({ call, queueDownload: (id, payload, size) => downloadCenter.preview({ id, kind: 'chat', payload, size }), busy: () => busy, setBusy, view: setView, symbol: icon('Sparkles', 20) });
   mountLibrary({ downloads: downloadCenter.show, busy: () => busy, view: setView, searchImage: searchModels, searchVoice: searchVoices, symbol: kind => icon(kind === 'image' ? 'Images' : kind === 'video' ? 'Film' : kind === 'voice' ? 'Mic2' : 'Sparkles', 19) });

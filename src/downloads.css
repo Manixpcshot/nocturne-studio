@@ -26,3 +26,85 @@ dialog.transfer-dialog { width: min(760px, calc(100vw - 36px)); }
 #transfer-variant { width: 100%; }
 .transfer-path { overflow-wrap: anywhere; color: var(--quiet); }
 #models-view:not([data-library-kind="image"]) .library-discovery, #models-view[data-library-scope="installed"] .library-discovery { display: none; }
+
+dialog#download-center {
+  width: min(1000px, calc(100vw - 36px));
+  max-height: min(840px, calc(100dvh - 30px));
+  padding: 20px 22px;
+  border-radius: 15px;
+}
+#download-center .transfer-header { margin-bottom: 14px; }
+#download-center .transfer-header h2 { font-size: 25px; letter-spacing: -.025em; }
+.transfer-overview {
+  display: grid;
+  grid-template-columns: minmax(160px, 28%) minmax(0, 1fr);
+  gap: 15px;
+  min-height: 128px;
+  padding: 12px;
+  background: color-mix(in srgb, var(--accent) 8%, var(--well));
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+#transfer-metrics dl { display: grid; align-content: center; height: 100%; gap: 6px; margin: 0; }
+#transfer-metrics dt { font-size: 11px; color: var(--quiet); }
+#transfer-metrics dd { width: max-content; margin: 0; font-size: 14px; font-weight: 700; font-variant-numeric: tabular-nums; }
+#transfer-metrics dl > div:first-child dd { font-size: 21px; color: var(--accent); }
+.transfer-chart {
+  direction: ltr;
+  display: grid;
+  grid-template-columns: repeat(40, 1fr);
+  gap: 3px;
+  align-items: end;
+  height: 122px;
+  grid-template-rows: minmax(0, 1fr);
+  padding: 6px 5px 0;
+  border-block-end: 1px solid var(--border);
+  background: repeating-linear-gradient(to top, transparent 0 calc(25% - 1px), var(--border) calc(25% - 1px) 25%);
+}
+.transfer-chart span {
+  height: max(2px, var(--height, 0%));
+  border-radius: 2px 2px 0 0;
+  background: color-mix(in srgb, var(--accent) 20%, var(--well));
+}
+.transfer-chart .has-rate { background: linear-gradient(to top, color-mix(in srgb, var(--accent) 34%, var(--well)), var(--accent)); }
+.transfer-controls { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; margin-top: 13px; }
+#transfer-filters { display: flex; flex-wrap: wrap; gap: 5px; }
+#transfer-filters button[aria-pressed="true"], #download-center[data-suspended] #transfer-suspend { background: var(--selected); color: var(--accent); border-color: var(--accent); }
+#transfer-filters span { margin-inline-start: 4px; color: var(--quiet); }
+.transfer-settings { margin-top: 10px; padding-block: 7px; border-block: 1px solid var(--border); }
+.transfer-settings summary { font-size: 12px; cursor: pointer; color: var(--quiet); }
+.transfer-settings .transfer-toolbar { margin-top: 9px; padding-bottom: 2px; }
+.transfer-settings .transfer-toolbar .transfer-check { display: flex; align-items: center; }
+.transfer-settings #transfer-concurrency { min-width: 65px; }
+.transfer-lane h3 { display: flex; align-items: center; gap: 7px; margin: 13px 0 6px; font-size: 13px; }
+.transfer-lane h3 span { color: var(--quiet); font-weight: 400; }
+#download-center .transfer-item { margin: 5px 0 8px; padding: 10px 12px; }
+.transfer-item[data-state="running"] { border-inline-start: 2px solid var(--accent); }
+.transfer-item[data-state="failed"] { border-inline-start: 2px solid var(--danger); }
+.transfer-name { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 8px; }
+.transfer-item-heading .transfer-kind { padding: 3px 7px; border-radius: 5px; background: var(--surface-raised); color: var(--quiet); font-size: 10px; }
+.transfer-item-heading .transfer-state { font-size: 11px; }
+.transfer-meta { font-variant-numeric: tabular-nums; }
+.transfer-notice {
+  position: fixed;
+  z-index: 40;
+  inset-inline-end: 18px;
+  inset-block-end: 20px;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  max-width: min(485px, calc(100vw - 36px));
+  padding: 8px 12px;
+  background: var(--surface, #201c24);
+  color: var(--ink, #f7f1f2);
+  border: 1px solid var(--border, #5f4d55);
+  border-radius: 10px;
+  box-shadow: 0 12px 24px #0005;
+}
+.transfer-notice p { margin: 0; font-size: 12px; overflow-wrap: anywhere; }
+.transfer-notice[hidden], .privacy-cover .transfer-notice { display: none; }
+@media (max-width: 650px) {
+  .transfer-overview { grid-template-columns: 1fr; }
+  #transfer-metrics dl { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
