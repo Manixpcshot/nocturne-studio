@@ -132,7 +132,11 @@ fn install_package(app: &AppHandle, python: &std::path::Path, package: &str) -> 
 }
 
 #[tauri::command]
-fn setup_status() -> Result<Value, String> { prerequisites_status() }
+async fn setup_status() -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(prerequisites_status)
+        .await
+        .map_err(|error| format!("بررسی پیش‌نیازها متوقف شد: {error}"))?
+}
 
 #[tauri::command]
 async fn update_diffusers_engine(

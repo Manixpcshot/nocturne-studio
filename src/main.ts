@@ -646,6 +646,7 @@ function render() {
 
   renderPromptPresets();
   mountWorkspacePreferences({ setCompact: setCompactNavigation, go: openWorkspace, translate: text => language === 'en' ? english[text] || text : text });
+  document.querySelector('[data-settings-tab="storage"]')!.addEventListener('click', () => void refreshStorage());
   restoreStudioDraft();
   mountChat({ call, busy: () => busy, setBusy, view: setView, symbol: icon('Sparkles', 20) });
   mountLibrary({ busy: () => busy, view: setView, searchImage: searchModels, searchVoice: searchVoices, symbol: kind => icon(kind === 'image' ? 'Images' : kind === 'video' ? 'Film' : kind === 'voice' ? 'Mic2' : 'Sparkles', 19) });
@@ -2201,7 +2202,7 @@ async function ensureSetup(): Promise<void> {
       message.textContent = 'در حال آماده‌سازی... این مرحله ممکن است چند دقیقه طول بکشد.';
       try {
         await invoke('setup_install');
-        showStartup('library');
+        showStartup('models', Boolean(startupModel));
         overlay.classList.add('hidden');
         resolve();
       } catch (error) {
@@ -2218,7 +2219,7 @@ async function ensureSetup(): Promise<void> {
 async function initialize() {
   const initialPage = startPage();
   if (initialPage === 'home') setView('home');
-  showStartup('prerequisites');
+  showStartup('prerequisites', Boolean(startupModel));
   await listen<{ message: string }>('setup-progress', event => { const el = document.querySelector('#setup-message'); if (el) el.textContent = event.payload.message; });
   await listen<DownloadProgress>('download-progress', event => updateDownloadProgress(event.payload));
   await listen<{ phase: string; row: number; model_id: string; row_completed: number; row_total: number; completed: number; total: number; name?: string }>('queue-progress', event => {
@@ -2244,8 +2245,8 @@ async function initialize() {
     document.querySelector('#batch-state')!.textContent = event.payload.completed < event.payload.total ? `Generating image ${event.payload.completed + 1} / ${event.payload.total}` : 'Finishing the batch…';
   });
   await ensureSetup();
-  showStartup('library');
-  const [status, images, savedVideos] = await Promise.all([call<Status>('status'), call<GalleryItem[]>('gallery'), call<{name:string; date:string}[]>('video_gallery')]);
+  showStartup('models', Boolean(startupModel));
+  const status = await call<Status>('status');
   models = status.models;
   videoModels = status.video_models;
   sdcppModels = status.sdcpp_models;
@@ -2254,6 +2255,8 @@ async function initialize() {
   loadedModels = status.loaded_models;
   const cacheState = await call<{ enabled: boolean; loaded_models: LoadedModel[] }>('cache_mode', { enabled: keepLoaded });
   loadedModels = cacheState.loaded_models;
+  showStartup('gallery', Boolean(startupModel));
+  const [images, savedVideos] = await Promise.all([call<GalleryItem[]>('gallery'), call<{name:string; date:string}[]>('video_gallery')]);
   videos = savedVideos;
   await refreshInstalledVoices();
   try { voices = await call('tts_gallery'); } catch { voices = []; }
@@ -2277,9 +2280,7 @@ async function initialize() {
   renderQueue();
   renderGallery();
   renderVideos();
-  showStartup('workspace');
-  await refreshStorage();
-  await refreshReferences();
+  if (navigationRevision === 0 && initialPage !== 'studio') openWorkspace(initialPage);
   if (startupModel) {
     const separator = startupModel.indexOf(':');
     const kind = startupModel.slice(0, separator);
@@ -2288,11 +2289,10 @@ async function initialize() {
       modelKind = kind === 'sdcpp' || kind === 'checkpoint' ? 'image' : kind;
       document.querySelectorAll('.kind-tab').forEach(tab => tab.classList.toggle('active', (tab as HTMLElement).dataset.kind === modelKind));
       renderModels();
-      showStartup('model');
+      showStartup('model', true, id);
       await loadModel(id, kind, false);
     } else { setBusy(false); toast('مدل انتخاب‌شده برای شروع پیدا نشد. از بخش مدل‌ها مدل دیگری انتخاب کن.', true); }
   } else setBusy(false);
-  if (navigationRevision === 0 && initialPage !== 'studio') openWorkspace(initialPage);
 }
 
 async function boot() {
@@ -2302,6 +2302,7 @@ async function boot() {
     rendered = true;
     await initialize();
     hideStartup();
+    void refreshReferences();
   } catch (error) {
     if (rendered) setBusy(false);
     startupFailed(error, rendered);

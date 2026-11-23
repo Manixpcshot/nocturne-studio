@@ -9,16 +9,23 @@
   </head>
   <body>
     <section id="startup-screen" aria-labelledby="startup-brand">
-      <div class="startup-content">
-        <div class="startup-mark" aria-hidden="true">
-          <img src="/src/assets/nocturne-icon.png" width="72" height="72" alt="" />
+      <div class="startup-panel">
+        <div class="startup-cover" aria-hidden="true">
+          <img src="/src/assets/nocturne-cover.webp" alt="" />
         </div>
-        <h1 id="startup-brand" dir="ltr">Nocturne Studio</h1>
-        <p id="startup-status" role="status">در حال راه‌اندازی…</p>
-        <p id="startup-details" hidden></p>
-        <div class="startup-actions" hidden>
-          <button type="button" id="startup-retry"></button>
-          <button type="button" id="startup-continue"></button>
+        <div class="startup-content">
+          <div class="startup-mark" aria-hidden="true">
+            <img src="/src/assets/nocturne-icon.png" width="72" height="72" alt="" />
+          </div>
+          <h1 id="startup-brand" dir="ltr">Nocturne Studio</h1>
+          <p id="startup-status" role="status">در حال راه‌اندازی…</p>
+          <p id="startup-details" hidden></p>
+          <ol class="startup-steps" id="startup-steps" role="list"></ol>
+          <p id="startup-slow" hidden></p>
+          <div class="startup-actions" hidden>
+            <button type="button" id="startup-retry"></button>
+            <button type="button" id="startup-continue"></button>
+          </div>
         </div>
       </div>
     </section>
