@@ -1,0 +1,36 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Nocturne Studio",
+  "version": "1.11.0",
+  "identifier": "com.codex.nocturnestudio",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:5173",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [{
+      "title": "Nocturne Studio",
+      "width": 1320,
+      "height": 850,
+      "minWidth": 980,
+      "minHeight": 680,
+      "backgroundColor": "#090b13"
+    }],
+    "security": { "csp": null }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "windows": {
+      "webviewInstallMode": { "type": "downloadBootstrapper" },
+      "nsis": {
+        "installerIcon": "icons/icon.ico",
+        "installerHooks": "installer-hooks.nsh"
+      }
+    },
+    "resources": { "resources/backend.py": "backend.py", "resources/web_page.html": "web_page.html", "resources/chat_engine.py": "chat_engine.py", "resources/llama_engine.py": "llama_engine.py" },
+    "icon": ["icons/icon.ico"]
+  }
+}

@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="fa" dir="rtl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Nocturne Studio</title>
+  <style>
+    :root{font-family:system-ui,sans-serif;color:#f4efff;background:#0c0e19}*{box-sizing:border-box}
+    body{margin:0;background:radial-gradient(circle at 80% -10%,#33254b 0,transparent 42%),#0c0e19;min-height:100vh}
+    button,input,textarea,select{font:inherit}button{cursor:pointer}button:disabled{opacity:.5;cursor:wait}
+    header{position:sticky;top:0;z-index:5;display:flex;align-items:center;gap:16px;padding:16px max(18px,calc((100vw - 1100px)/2));background:#111522e8;backdrop-filter:blur(18px);border-bottom:1px solid #37334a}
+    .mark{width:38px;height:38px;display:grid;place-items:center;border-radius:13px;background:linear-gradient(145deg,#a883f6,#5f42ac);font-size:22px}
+    .brand{font-weight:800;letter-spacing:.08em;color:#e3d1ff}.spacer{flex:1}nav{display:flex;gap:8px}
+    nav button,.ghost{border:1px solid #615579;background:#27243c;color:#dfd2f8;border-radius:10px;padding:8px 12px}
+    nav button.active{background:#7450b8;color:white}main{max-width:1100px;margin:auto;padding:26px 18px 70px}
+    .hero{padding:30px 0 18px}.hero small{color:#b696ef;letter-spacing:.15em}.hero h1{font-size:clamp(28px,5vw,48px);line-height:1.35;margin:6px 0}.hero p,.muted{color:#aeb0c3}
+    .panel{border:1px solid #45405c;border-radius:22px;background:linear-gradient(145deg,#1a1e30,#121827);box-shadow:0 20px 55px #0004;padding:22px;margin:16px 0}
+    .panel h2{margin:0 0 16px;font-size:19px}.layout{display:grid;grid-template-columns:minmax(0,1.1fr) minmax(300px,.9fr);gap:18px}
+    label{display:block;color:#d1c5e7;font-size:13px;margin:15px 0 7px}input,textarea,select{width:100%;padding:12px 14px;border:1px solid #615777;border-radius:12px;background:#0c1422;color:#f8f4ff;outline:none}input:focus,textarea:focus,select:focus{border-color:#b995ff}
+    textarea{min-height:180px;resize:vertical;line-height:1.9}.primary{border:0;border-radius:12px;background:linear-gradient(120deg,#8d5be2,#5d55b8);color:white;padding:12px 20px;font-weight:700;margin-top:18px;box-shadow:0 8px 23px #7d50d540}
+    #preview{width:100%;min-height:320px;object-fit:contain;background:radial-gradient(circle,#252138,#101624 60%);border-radius:16px;display:block}#preview:not([src]){opacity:.45}
+    .status{min-height:28px;color:#c6aaef;font-size:13px;line-height:1.7}.hidden{display:none!important}
+    .folders{display:flex;flex-wrap:wrap;gap:8px;margin:12px 0 20px}.folders button{padding:9px 14px;border-radius:11px;border:1px solid #655382;background:#272238;color:#ddcefa}.folders button.active{background:#7651bb;color:#fff}
+    .gallery{display:grid;grid-template-columns:repeat(auto-fill,minmax(205px,1fr));gap:14px}.tile{border:1px solid #45405d;border-radius:15px;overflow:hidden;background:#171c2b;text-align:right}.tile img{width:100%;aspect-ratio:1;object-fit:cover;cursor:zoom-in}.tile div{padding:11px}.tile b{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px}.tile small{color:#aeb4cc;font-size:11px}
+    #viewer{position:fixed;inset:0;z-index:10;display:grid;place-items:center;background:#060711ed;padding:20px}#viewer img{max-width:95vw;max-height:85vh;object-fit:contain}#viewer button{position:absolute;top:20px;left:20px}
+    #login{max-width:430px;margin:8vh auto}#login h1{margin:0;color:#e9d9ff}
+    @media(max-width:800px){.layout{grid-template-columns:1fr}header{flex-wrap:wrap}#preview{min-height:240px}}
+  </style>
+</head>
+<body>
+  <header><div class="mark">✦</div><div class="brand">NOCTURNE</div><div class="spacer"></div><nav id="nav" class="hidden"><button id="tab-create" class="active">ساخت تصویر</button><button id="tab-gallery">گالری</button><button id="logout" class="ghost">خروج</button></nav></header>
+  <main>
+    <section id="login" class="panel"><h1>خوش آمدی</h1><p class="muted">با نام و رمزی که مدیر برایت ساخته وارد شو.</p><label>نام کاربری</label><input id="username" autocomplete="username"><label>رمز عبور</label><input id="password" type="password" autocomplete="current-password"><button id="login-button" class="primary">ورود</button><p id="login-status" class="status"></p></section>
+    <section id="workspace" class="hidden"><div class="hero"><small>CREATE WITH NOCTURNE</small><h1>ایده‌ات را تصویر کن.</h1><p>یکی از مدل‌های آمادهٔ سرور را انتخاب کن.</p></div><div class="layout"><div class="panel"><h2>ساخت تصویر</h2><label>مدل آماده</label><select id="model"></select><label>توضیح تصویر</label><textarea id="prompt" placeholder="مثلاً شهری بارانی با نور نئون در شب..."></textarea><label>نسبت تصویر</label><select id="aspect"><option>1:1</option><option>16:9</option><option>9:16</option><option>4:3</option><option>3:4</option><option>3:2</option><option>2:3</option></select><button id="generate" class="primary">ساخت تصویر</button><p id="generate-status" class="status"></p></div><div class="panel"><h2>پیش‌نمایش</h2><img id="preview" alt="خروجی تصویر"><p class="muted">تصویر پس از ساخت در پوشهٔ تو در گالری وب‌سایت ذخیره می‌شود.</p></div></div></section>
+    <section id="library" class="hidden"><div class="hero"><small>SHARED GALLERY</small><h1>گالری همهٔ کاربران.</h1><p>پوشهٔ هر کاربر را باز کن و تصویرهایش را ببین.</p></div><div class="panel"><div id="folders" class="folders"></div><div id="gallery" class="gallery"></div><p id="gallery-status" class="status"></p></div></section>
+  </main>
+  <div id="viewer" class="hidden"><button id="viewer-close" class="ghost">بستن ×</button><img id="viewer-image" alt="تصویر بزرگ"></div>
+  <script>
+    const $=id=>document.getElementById(id);let session=sessionStorage.getItem('nocturne-session')||'',folder='all';
+    async function api(path,options={}){const response=await fetch(path,{...options,headers:{'Authorization':'Bearer '+session,...(options.headers||{})}});const data=await response.json();if(!response.ok)throw Error(data.error||'خطا');return data}
+    function showApp(){ $('login').classList.toggle('hidden',!!session);$('workspace').classList.toggle('hidden',!session);$('nav').classList.toggle('hidden',!session);if(session)loadModels() }
+    $('login-button').onclick=async()=>{const button=$('login-button');button.disabled=true;$('login-status').textContent='در حال ورود...';try{const data=await api('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:$('username').value,password:$('password').value})});session=data.session;sessionStorage.setItem('nocturne-session',session);$('password').value='';$('login-status').textContent='';showApp()}catch(error){$('login-status').textContent=String(error)}finally{button.disabled=false}};
+    $('logout').onclick=()=>{sessionStorage.removeItem('nocturne-session');session='';$('library').classList.add('hidden');showApp()};
+    $('tab-create').onclick=()=>{$('workspace').classList.remove('hidden');$('library').classList.add('hidden');$('tab-create').classList.add('active');$('tab-gallery').classList.remove('active');loadModels()};
+    $('tab-gallery').onclick=()=>{$('workspace').classList.add('hidden');$('library').classList.remove('hidden');$('tab-create').classList.remove('active');$('tab-gallery').classList.add('active');loadGallery()};
+    async function loadModels(){try{const data=await api('/api/models');const select=$('model'),old=select.value;select.replaceChildren();for(const model of data.models){const option=document.createElement('option');option.value=model.kind+':'+model.id;option.textContent=model.id+(model.active?' · فعال':'');select.append(option)}if([...select.options].some(x=>x.value===old))select.value=old;$('generate-status').textContent=data.models.length?'':'مدلی در حافظهٔ سرور آماده نیست. مدیر باید مدل را در برنامه بارگذاری کند.'}catch(error){$('generate-status').textContent=String(error)}}
+    $('generate').onclick=async()=>{const button=$('generate');button.disabled=true;$('generate-status').textContent='در حال ساخت تصویر...';try{const data=await api('/api/generate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({prompt:$('prompt').value,aspect_ratio:$('aspect').value,model:$('model').value})});$('preview').src=data.image;$('generate-status').textContent='تصویر ساخته و در پوشهٔ تو ذخیره شد.'}catch(error){$('generate-status').textContent=String(error)}finally{button.disabled=false}};
+    async function loadGallery(){const target=$('gallery');target.replaceChildren();$('gallery-status').textContent='در حال خواندن گالری...';try{const data=await api('/api/gallery');const folders=$('folders');folders.replaceChildren();for(const name of ['all',...data.folders]){const button=document.createElement('button');button.textContent=name==='all'?'همهٔ کاربران':name;button.classList.toggle('active',folder===name);button.onclick=()=>{folder=name;loadGallery()};folders.append(button)}for(const item of data.images.filter(x=>folder==='all'||x.user===folder)){const tile=document.createElement('div');tile.className='tile';const img=document.createElement('img');img.alt=item.prompt||item.name;img.loading='lazy';const response=await fetch('/api/image?user='+encodeURIComponent(item.user)+'&name='+encodeURIComponent(item.name),{headers:{Authorization:'Bearer '+session}});if(!response.ok)continue;const blob=await response.blob();const url=URL.createObjectURL(blob);img.src=url;img.onclick=()=>{$('viewer-image').src=url;$('viewer').classList.remove('hidden')};const detail=document.createElement('div'),title=document.createElement('b'),meta=document.createElement('small');title.textContent=item.prompt||item.name;meta.textContent=item.user+' · '+item.model;detail.append(title,meta);tile.append(img,detail);target.append(tile)}$('gallery-status').textContent=data.images.length?'':'هنوز عکسی در گالری وب‌سایت نیست.'}catch(error){$('gallery-status').textContent=String(error)}}
+    $('viewer-close').onclick=()=>$('viewer').classList.add('hidden');$('viewer').onclick=e=>{if(e.target===$('viewer'))$('viewer').classList.add('hidden')};showApp();
+  </script>
+</body>
+</html>
