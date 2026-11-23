@@ -240,7 +240,7 @@ export function mountWorkspacePreferences(api: { setCompact: (compact: boolean) 
     }
   };
   const openCommand = () => {
-    if (dialog.open || document.documentElement.classList.contains('privacy-cover') ||
+    if (document.querySelector<HTMLElement>('#app')?.inert || dialog.open || document.documentElement.classList.contains('privacy-cover') ||
         document.querySelector('#setup-overlay:not(.hidden), #viewer-modal:not(.hidden), #gallery-lock:not(.hidden)')) return;
     input.value = '';
     renderResults();

@@ -13,6 +13,7 @@ import { mountLibrary } from './library';
 import { mountWorkspacePreferences, pageInfo, rememberPage, startPage, workspacePages } from './workspace-ui';
 import brandIcon from './assets/nocturne-icon.png';
 import './redesign.css';
+import { hideStartup, showStartup, startupFailed } from './startup';
 import './projects.css';
 import { activateProject, addProject, buildCombinations, newId, pendingQueue, persistQueue, projectId, projects, relatedImages, scopedKey, stored, type QueueJob } from './projects';
 import { matrixDialog, projectBar, projectDialog, queueTools } from './project-ui';
@@ -2164,6 +2165,7 @@ function attachEvents() {
   document.querySelector<HTMLButtonElement>('#close-modal')!.onclick = () => document.querySelector('#viewer-modal')!.classList.add('hidden');
   document.querySelector('#viewer-modal')!.addEventListener('click', event => { if (event.target === event.currentTarget) (event.currentTarget as HTMLElement).classList.add('hidden'); });
   window.addEventListener('keydown', event => {
+    if (app.inert) return;
     if (event.ctrlKey && event.shiftKey && event.key.toLowerCase() === 'h') { event.preventDefault(); privacyCover = !privacyCover; applyPrivacy(); return; }
     if (snakeTimer !== null && document.querySelector('#batch-view')?.classList.contains('active') && !(event.target instanceof HTMLInputElement) && !(event.target instanceof HTMLTextAreaElement)) {
       const direction = ({ ArrowUp: 'up', ArrowDown: 'down', ArrowLeft: 'left', ArrowRight: 'right', w: 'up', s: 'down', a: 'left', d: 'right' } as Record<string, string>)[event.key];
@@ -2189,6 +2191,7 @@ async function ensureSetup(): Promise<void> {
   const message = document.querySelector<HTMLElement>('#setup-message')!;
   const retry = document.querySelector<HTMLButtonElement>('#setup-retry')!;
   overlay.classList.remove('hidden');
+  hideStartup();
   document.querySelector('#setup-python')!.textContent = status.python ? '✓ Python 3.13 نصب است' : '• Python 3.13 نصب نیست';
   document.querySelector('#setup-packages')!.textContent = `${status.missing.length.toLocaleString('fa-IR')} بستهٔ لازم باید نصب شود`;
   await new Promise<void>(resolve => {
@@ -2198,6 +2201,7 @@ async function ensureSetup(): Promise<void> {
       message.textContent = 'در حال آماده‌سازی... این مرحله ممکن است چند دقیقه طول بکشد.';
       try {
         await invoke('setup_install');
+        showStartup('library');
         overlay.classList.add('hidden');
         resolve();
       } catch (error) {
@@ -2211,10 +2215,10 @@ async function ensureSetup(): Promise<void> {
   });
 }
 
-async function boot() {
+async function initialize() {
   const initialPage = startPage();
-  render();
   if (initialPage === 'home') setView('home');
+  showStartup('prerequisites');
   await listen<{ message: string }>('setup-progress', event => { const el = document.querySelector('#setup-message'); if (el) el.textContent = event.payload.message; });
   await listen<DownloadProgress>('download-progress', event => updateDownloadProgress(event.payload));
   await listen<{ phase: string; row: number; model_id: string; row_completed: number; row_total: number; completed: number; total: number; name?: string }>('queue-progress', event => {
@@ -2239,55 +2243,69 @@ async function boot() {
     showBatchProgress(event.payload.completed, event.payload.total, event.payload.name);
     document.querySelector('#batch-state')!.textContent = event.payload.completed < event.payload.total ? `Generating image ${event.payload.completed + 1} / ${event.payload.total}` : 'Finishing the batch…';
   });
-  try {
-    await ensureSetup();
-    const [status, images, savedVideos] = await Promise.all([call<Status>('status'), call<GalleryItem[]>('gallery'), call<{name:string; date:string}[]>('video_gallery')]);
-    models = status.models;
-    videoModels = status.video_models;
-    sdcppModels = status.sdcpp_models;
-    checkpointModels = status.checkpoint_models;
-    adapters = status.adapters;
-    loadedModels = status.loaded_models;
-    const cacheState = await call<{ enabled: boolean; loaded_models: LoadedModel[] }>('cache_mode', { enabled: keepLoaded });
-    loadedModels = cacheState.loaded_models;
-    videos = savedVideos;
-    await refreshInstalledVoices();
-    try { voices = await call('tts_gallery'); } catch { voices = []; }
-    renderVoices();
-    gallery = images;
-    modelFolder = status.model_folder;
-    document.querySelector('#voice-folder')!.textContent = "پوشهٔ دانلود: " + modelFolder;
-    outputFolder = status.output_folder;
-    document.querySelector('#output-folder')!.textContent = outputFolder;
-    document.querySelector('#model-folder')!.textContent = modelFolder;
-    devices = status.devices;
-    selectedDevice = status.device;
-    const deviceSelect = document.querySelector<HTMLSelectElement>('#device-select')!;
-    deviceSelect.innerHTML = devices.map(item => `<option value="${safe(item.id)}">${safe(item.name)}</option>`).join('');
-    deviceSelect.value = selectedDevice;
-    document.querySelector('#gpu-name')!.textContent = devices.find(item => item.id === selectedDevice)?.name || selectedDevice;
-    void refreshHardware();
-    if (hardwarePoll !== null) window.clearInterval(hardwarePoll);
-    hardwarePoll = window.setInterval(() => { void refreshHardware(); }, 3500);
-    renderModels();
-    renderQueue();
-    renderGallery();
-    renderVideos();
-    await refreshStorage();
-    await refreshReferences();
-    if (startupModel) {
-      const separator = startupModel.indexOf(':');
-      const kind = startupModel.slice(0, separator);
-      const id = startupModel.slice(separator + 1);
-      if ((kind === 'image' && models.includes(id)) || (kind === 'video' && videoModels.includes(id)) || (kind === 'sdcpp' && sdcppModels.includes(id)) || (kind === 'checkpoint' && checkpointModels.includes(id))) {
-        modelKind = kind === 'sdcpp' || kind === 'checkpoint' ? 'image' : kind;
-        document.querySelectorAll('.kind-tab').forEach(tab => tab.classList.toggle('active', (tab as HTMLElement).dataset.kind === modelKind));
-        renderModels();
-        await loadModel(id, kind, false);
-      } else { setBusy(false); toast('مدل انتخاب‌شده برای شروع پیدا نشد. از بخش مدل‌ها مدل دیگری انتخاب کن.', true); }
-    } else setBusy(false);
-    if (navigationRevision === 0 && initialPage !== 'studio') openWorkspace(initialPage);
-  } catch (error) { setBusy(false); toast(String(error), true); }
+  await ensureSetup();
+  showStartup('library');
+  const [status, images, savedVideos] = await Promise.all([call<Status>('status'), call<GalleryItem[]>('gallery'), call<{name:string; date:string}[]>('video_gallery')]);
+  models = status.models;
+  videoModels = status.video_models;
+  sdcppModels = status.sdcpp_models;
+  checkpointModels = status.checkpoint_models;
+  adapters = status.adapters;
+  loadedModels = status.loaded_models;
+  const cacheState = await call<{ enabled: boolean; loaded_models: LoadedModel[] }>('cache_mode', { enabled: keepLoaded });
+  loadedModels = cacheState.loaded_models;
+  videos = savedVideos;
+  await refreshInstalledVoices();
+  try { voices = await call('tts_gallery'); } catch { voices = []; }
+  renderVoices();
+  gallery = images;
+  modelFolder = status.model_folder;
+  document.querySelector('#voice-folder')!.textContent = "پوشهٔ دانلود: " + modelFolder;
+  outputFolder = status.output_folder;
+  document.querySelector('#output-folder')!.textContent = outputFolder;
+  document.querySelector('#model-folder')!.textContent = modelFolder;
+  devices = status.devices;
+  selectedDevice = status.device;
+  const deviceSelect = document.querySelector<HTMLSelectElement>('#device-select')!;
+  deviceSelect.innerHTML = devices.map(item => `<option value="${safe(item.id)}">${safe(item.name)}</option>`).join('');
+  deviceSelect.value = selectedDevice;
+  document.querySelector('#gpu-name')!.textContent = devices.find(item => item.id === selectedDevice)?.name || selectedDevice;
+  void refreshHardware();
+  if (hardwarePoll !== null) window.clearInterval(hardwarePoll);
+  hardwarePoll = window.setInterval(() => { void refreshHardware(); }, 3500);
+  renderModels();
+  renderQueue();
+  renderGallery();
+  renderVideos();
+  showStartup('workspace');
+  await refreshStorage();
+  await refreshReferences();
+  if (startupModel) {
+    const separator = startupModel.indexOf(':');
+    const kind = startupModel.slice(0, separator);
+    const id = startupModel.slice(separator + 1);
+    if ((kind === 'image' && models.includes(id)) || (kind === 'video' && videoModels.includes(id)) || (kind === 'sdcpp' && sdcppModels.includes(id)) || (kind === 'checkpoint' && checkpointModels.includes(id))) {
+      modelKind = kind === 'sdcpp' || kind === 'checkpoint' ? 'image' : kind;
+      document.querySelectorAll('.kind-tab').forEach(tab => tab.classList.toggle('active', (tab as HTMLElement).dataset.kind === modelKind));
+      renderModels();
+      showStartup('model');
+      await loadModel(id, kind, false);
+    } else { setBusy(false); toast('مدل انتخاب‌شده برای شروع پیدا نشد. از بخش مدل‌ها مدل دیگری انتخاب کن.', true); }
+  } else setBusy(false);
+  if (navigationRevision === 0 && initialPage !== 'studio') openWorkspace(initialPage);
 }
 
-boot();
+async function boot() {
+  let rendered = false;
+  try {
+    render();
+    rendered = true;
+    await initialize();
+    hideStartup();
+  } catch (error) {
+    if (rendered) setBusy(false);
+    startupFailed(error, rendered);
+  }
+}
+
+void boot();
