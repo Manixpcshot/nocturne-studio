@@ -4,7 +4,9 @@ Nocturne Studio is a Windows desktop app for generating images, video and speech
 
 [Download the Windows release](https://github.com/Manixpcshot/nocturne-studio/releases/latest) · [راهنمای فارسی](README.fa.md)
 
-![Image studio with a sample image and generation controls](docs/screenshots/image-studio.png)
+![Nocturne Studio 2.0 home with shortcuts to each workspace](docs/screenshots/home.png)
+
+Version 2.0 introduces a new app icon, a graphite-and-peach theme and a home screen with shortcuts to the studios, model library and gallery. The image studio keeps its Create, Edit and Compare modes in a dedicated toolbar. Choose your theme and startup page in Settings.
 
 ## What you can do
 
@@ -14,6 +16,8 @@ Nocturne Studio is a Windows desktop app for generating images, video and speech
 - Generate video or speech with supported models and organize outputs in local galleries.
 - Chat with local models using Ollama or compatible llama.cpp runtimes. The agent mode can inspect selected text attachments, and code blocks can be opened and saved.
 - Set model and output folders, change themes, configure notifications and choose Persian or English under **Settings → Appearance**.
+
+![Image studio with a sample image and generation controls](docs/screenshots/image-studio.png)
 
 ![Batch jobs with separate prompts, models, counts and aspect ratios](docs/screenshots/batch-queue.png)
 

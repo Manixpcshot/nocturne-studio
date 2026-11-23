@@ -1,4 +1,10 @@
 export const additionalTranslations: Record<string, string> = {
+  "نُکتِرن": "Nocturne",
+  "از ایده تا اثر": "Make what you imagine",
+  "تصویر بساز، ویدیو و صدا تولید کن یا با مدل‌های محلی گفت‌وگو کن.": "Create images, generate video and audio, or chat with local models.",
+  "ابزارهای استودیو": "Studio tools",
+  "تصاویر ذخیره‌شده و پرامپت‌های قبلی": "Saved images and past prompts",
+
   "تصویر": "Image",
   "ویدیو": "Video",
   "صدا": "Audio",
@@ -97,6 +103,7 @@ export const additionalTranslations: Record<string, string> = {
   "بازخوانی مدل‌های نصب‌شده": "Refresh installed models",
   "مدل صدای کاملی در پوشه‌های فعلی پیدا نشد.": "No complete voice models found in the current folders.",
   "حالت استودیوی تصویر": "Image studio mode",
+  "مدیریت سایت، کاربران و سهمیه‌ها": "Manage the site, users and quotas",
   "بخش‌های تنظیمات": "Settings categories",
   "مدل در حال ویرایش عکس است...": "Editing image…",
   "ساخت تصویر انجام نشد": "Image generation failed",

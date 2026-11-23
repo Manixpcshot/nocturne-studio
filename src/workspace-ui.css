@@ -51,38 +51,6 @@
   scroll-behavior: auto !important;
 }
 
-#home-view, #settings-view { max-width: 1250px; margin: auto; }
-.workspace-launchers {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(235px, 1fr));
-  gap: var(--workspace-gap);
-}
-
-.workspace-launcher {
-  display: grid;
-  grid-template-columns: 35px minmax(0, 1fr) 15px;
-  align-items: center;
-  gap: 10px;
-  min-height: 76px;
-  padding: 10px;
-  text-align: start;
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  background: var(--surface);
-  color: var(--ink);
-  transition: border-color .16s, background .16s;
-}
-
-.workspace-launcher:hover, .workspace-launcher:focus-visible { border-color: var(--accent); background: var(--surface-raised); }
-.workspace-launcher b, .workspace-launcher small { display: block; }
-.workspace-launcher b { font-size: 13px; }
-.workspace-launcher small { margin-top: 2px; color: var(--quiet); font-size: 11px; }
-.launcher-symbol { display: grid; place-items: center; height: 35px; border-radius: 8px; background: var(--selected); color: var(--accent); }
-.launcher-arrow { display: grid; color: var(--quiet); }
-.launcher-arrow svg { width: 14px; }
-html[dir="ltr"] .launcher-arrow { transform: scaleX(-1); }
-.workspace-home-links { display: flex; gap: 7px; margin-top: 12px; }
-
 .preferences-layout {
   display: grid;
   grid-template-columns: minmax(150px, 190px) minmax(0, 1fr);

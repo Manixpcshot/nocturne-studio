@@ -1,4 +1,5 @@
 import './workspace-ui.css';
+import cover from './assets/nocturne-cover.webp';
 
 export const pages = {
   home: { label: 'خانه', group: '' },
@@ -33,7 +34,7 @@ export function rememberPage(page: string) {
 export function startPage() {
   const saved = localStorage.getItem(startKey);
   const page = saved === 'last' ? localStorage.getItem(lastKey) : saved;
-  return page && pageInfo(page) ? page : 'studio';
+  return page && pageInfo(page) ? page : 'home';
 }
 
 const settingsTabs = [
@@ -51,29 +52,42 @@ const privacyControls = [
   ['hide-gallery', 'تارکردن تصاویر گالری'],
 ] as const;
 
-export function workspacePages(themeOptions: string, aspectOptions: string, icon: (name: 'WandSparkles' | 'Film' | 'Mic2' | 'Layers' | 'Blocks' | 'Images' | 'ArrowUpLeft' | 'Sparkles') => string) {
+export function workspacePages(themeOptions: string, aspectOptions: string, icon: (name: 'WandSparkles' | 'Film' | 'Mic2' | 'Layers' | 'Blocks' | 'Images' | 'ArrowUpLeft' | 'Sparkles' | 'Globe2') => string) {
   const cards = [
-    ['studio', 'WandSparkles', 'ساخت، ویرایش و مقایسهٔ تصویر'],
     ['video', 'Film', 'ساخت ویدیو از پرامپت'],
     ['voice', 'Mic2', 'تبدیل متن به گفتار'],
     ['chat', 'Sparkles', 'گفتگو با مدل محلی'],
     ['batch', 'Layers', 'ساخت چند تصویر و مدیریت صف'],
-    ['models', 'Blocks', 'پیداکردن و مدیریت مدل‌ها'],
+    ['gallery', 'Images', 'تصاویر ذخیره‌شده و پرامپت‌های قبلی'],
+    ['website', 'Globe2', 'مدیریت سایت، کاربران و سهمیه‌ها'],
   ] as const;
   const startOptions = (Object.keys(pages) as Page[]).filter(page => page !== 'settings');
-  const savedStart = localStorage.getItem(startKey) || 'studio';
-  const validStart = savedStart === 'last' || startOptions.some(page => page === savedStart) ? savedStart : 'studio';
+  const savedStart = localStorage.getItem(startKey) || 'home';
+  const validStart = savedStart === 'last' || startOptions.some(page => page === savedStart) ? savedStart : 'home';
   const option = (value: string, label: string) => `<option value="${value}" ${validStart === value ? 'selected' : ''}>${label}</option>`;
   return `
     <section class="view" id="home-view">
-      <div class="section-head"><h1>خانه</h1><p>یک بخش را انتخاب کن و شروع کن.</p></div>
-      <div class="workspace-launchers">${cards.map(([page, symbol, description]) => `
-        <button type="button" class="workspace-launcher" data-open-workspace="${page}">
-          <span class="launcher-symbol">${icon(symbol)}</span>
-          <span><b>${pages[page].label}</b><small>${description}</small></span>
-          <span class="launcher-arrow" aria-hidden="true">${icon('ArrowUpLeft')}</span>
-        </button>`).join('')}</div>
-      <div class="workspace-home-links"><button class="small-button" data-open-workspace="gallery">${icon('Images')} <span>گالری من</span></button><button class="small-button" data-open-workspace="settings">تنظیمات</button></div>
+      <header class="home-hero">
+        <div class="hero-content">
+          <div class="hero-wordmark" dir="ltr">Nocturne <span>Studio</span></div>
+          <h1>از ایده تا اثر</h1>
+          <p>تصویر بساز، ویدیو و صدا تولید کن یا با مدل‌های محلی گفت‌وگو کن.</p>
+          <div class="hero-actions">
+            <button type="button" class="primary-button" data-open-workspace="studio">${icon('WandSparkles')} <span>ساخت تصویر</span></button>
+            <button type="button" class="small-button" data-open-workspace="models">${icon('Blocks')} <span>کتابخانهٔ مدل‌ها</span></button>
+          </div>
+        </div>
+        <img class="hero-cover" src="${cover}" alt="" fetchpriority="high"/>
+      </header>
+      <section class="home-tools" aria-labelledby="home-tools-title">
+        <h2 id="home-tools-title">ابزارهای استودیو</h2>
+        <div class="workspace-launchers">${cards.map(([page, symbol, description]) => `
+          <button type="button" class="workspace-launcher" data-open-workspace="${page}">
+            <span class="launcher-symbol" aria-hidden="true">${icon(symbol)}</span>
+            <span><b>${pages[page].label}</b><small>${description}</small></span>
+            <span class="launcher-arrow" aria-hidden="true">${icon('ArrowUpLeft')}</span>
+          </button>`).join('')}</div>
+      </section>
     </section>
     <section class="view" id="settings-view">
       <div class="section-head"><h1>تنظیمات</h1><p>ظاهر و رفتار برنامه را برای خودت تنظیم کن.</p></div>
@@ -152,7 +166,7 @@ export function mountWorkspacePreferences(api: { setCompact: (compact: boolean) 
   document.querySelector<HTMLButtonElement>('#reset-appearance')!.onclick = () => {
     for (const key of [compactKey, densityKey, motionKey]) localStorage.removeItem(key);
     applyAppearance();
-    select('theme-select').value = 'neon';
+    select('theme-select').value = 'dusk';
     select('theme-select').dispatchEvent(new Event('change', { bubbles: true }));
   };
 
