@@ -3,7 +3,9 @@ import { stored } from './projects';
 
 export type DownloadKind = 'image' | 'video' | 'sdcpp' | 'checkpoint' | 'adapter' | 'voice' | 'chat';
 export type Transfer = { model_id: string; job_id?: string; phase?: string; file?: string; processed?: number; total?: number; speed?: number; received?: number; retry_in?: number; error?: string };
+export type EngineUpgrade = { installed: string; minimum: string; profile: 'minimax-h3' };
 export type DownloadPlan = {
+  upgrade?: EngineUpgrade | null;
   download_kind?: string | null; gated?: boolean; reason?: string; folder?: string;
   download_bytes?: number | null; remaining_bytes?: number | null; required_bytes?: number | null; free_bytes?: number | null;
   requirements?: string[]; revisions?: Record<string, string>; variants?: { name: string; size: number }[];
@@ -25,6 +27,7 @@ type Api = {
   partials: (job: DownloadJob, expected?: number) => Promise<{ bytes: number; files: number }>;
   open: (job: DownloadJob) => void;
   error: (message: string) => void;
+  upgrade: () => Promise<true | string>;
   notify: (message: string) => void;
 };
 const key = 'nocturne-download-center-v1';
@@ -508,6 +511,33 @@ export function mountDownloadCenter(api: Api) {
           ${insufficient ? `<p class="transfer-error">${tr('فضای آزاد کافی نیست.','There is not enough free disk space.')}</p>` : ''}
           ${plan.file_plan?.length ? `<details ${plan.file_plan.length < 12 ? 'open' : ''}><summary>${tr('فایل‌ها','Files')} · ${plan.file_plan.length}</summary>
           <ul>${plan.file_plan.map(file => `<li><bdi>${escape(file.name)}</bdi><span>${format(file.size)} · ${file.remaining === 0 ? tr('روی سیستم','Cached') : file.remaining === file.size ? tr('برای دریافت','To download') : format(file.remaining) + ' ' + tr('باقی‌مانده','left')}</span></li>`).join('')}</ul></details>` : ''}`;
+        if (plan.upgrade) {
+          const notice = document.createElement('div');
+          notice.className = 'engine-review engine-review-warning';
+          notice.innerHTML = `<div><strong>${tr('به‌روزرسانی موتور لازم است','Engine update required')}</strong>
+            <p dir="ltr">Diffusers ${escape(plan.upgrade.installed)} → ≥ ${escape(plan.upgrade.minimum)}</p></div>
+            <button type="button" class="small-button">${tr('به‌روزرسانی و بررسی دوباره','Update and recheck')}</button>`;
+          planBody.prepend(notice);
+          notice.querySelector('button')!.onclick = async () => {
+            const button = notice.querySelector<HTMLButtonElement>('button')!;
+            button.disabled = true;
+            const original = button.textContent;
+            button.textContent = tr('در حال به‌روزرسانی…','Updating…');
+            const result = await api.upgrade();
+            if (!planDialog.open || sequence !== requestNumber) return;
+            if (result === true) void inspect(selected);
+            else {
+              button.disabled = false;
+              button.textContent = original;
+              notice.querySelector('.engine-review-error')?.remove();
+              const error = document.createElement('p');
+              error.className = 'engine-review-error';
+              error.setAttribute('role', 'alert');
+              error.textContent = result;
+              notice.append(error);
+            }
+          };
+        }
         confirm.disabled = !supported || insufficient;
         confirm.onclick = () => {
           if (confirm.disabled) return;

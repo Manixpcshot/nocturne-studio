@@ -24,6 +24,7 @@ import atexit
 from functools import lru_cache
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 from urllib.parse import urlsplit
 
 os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "45")
@@ -123,6 +124,82 @@ def emit_progress(data):
     emit_event("download-progress", data)
 
 
+MINIMAX_IMAGE_CLASS = "MiniMaxH3ImageModularPipeline"
+MINIMAX_IMAGE_BLOCKS = "MiniMaxH3ImageBlocks"
+MINIMAX_DIFFUSERS = "0.43.0"
+
+
+def is_minimax_image(config):
+    return isinstance(config, dict) and config.get("_class_name") == MINIMAX_IMAGE_CLASS and config.get("_blocks_class_name") == MINIMAX_IMAGE_BLOCKS
+
+
+def component_folders(config):
+    parts = {}
+    modular = is_minimax_image(config)
+    for key, value in config.items():
+        if key.startswith("_") or not isinstance(value, list) or len(value) < 2 or not all(isinstance(item, str) for item in value[:2]):
+            continue
+        name = (value[2].get("subfolder") or key) if modular and len(value) > 2 and isinstance(value[2], dict) else key
+        if modular and (not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9_]+", name)):
+            raise ValueError("Invalid modular component folder.")
+        parts[name] = value
+    return parts
+
+
+def all_minimax_shards_present(folder, parts):
+    for name, _ in parts:
+        for index in (folder / name).glob("*.safetensors.index.json"):
+            shards = json.loads(index.read_text(encoding="utf-8")).get("weight_map", {}).values()
+            if not shards or not all(Path(shard).name == shard and (index.parent / shard).is_file() for shard in shards):
+                return False
+    return True
+
+
+def local_pipeline_index(root):
+    modular = root / "modular_model_index.json"
+    if modular.is_file() and is_minimax_image(json.loads(modular.read_text(encoding="utf-8"))):
+        return modular
+    standard = root / "model_index.json"
+    return standard if standard.is_file() else root / "merged-model" / "model_index.json"
+
+
+def remote_pipeline_index(model_id, names, revision):
+    if "modular_model_index.json" in names:
+        path = hf_hub_download(model_id, "modular_model_index.json", revision=revision, cache_dir=MODEL_CACHE, etag_timeout=20)
+        if is_minimax_image(json.loads(Path(path).read_text(encoding="utf-8"))):
+            return "modular_model_index.json", path
+    index = "model_index.json" if "model_index.json" in names else "merged-model/model_index.json"
+    if index not in names:
+        raise RuntimeError("No supported pipeline index was found.")
+    return index, hf_hub_download(model_id, index, revision=revision, cache_dir=MODEL_CACHE, etag_timeout=20)
+
+
+def minimax_engine_ready(diffusers):
+    from packaging.version import Version
+    return Version(diffusers.__version__) >= Version(MINIMAX_DIFFUSERS) and all(
+        hasattr(diffusers, name) for name in ("ModularPipeline", "ComponentsManager", "MiniMaxH3ImageTransformer2DModel")
+    )
+
+
+class MiniMaxImageEngine:
+    def __init__(self, folder, device):
+        import torch
+        import diffusers
+        if not minimax_engine_ready(diffusers):
+            raise RuntimeError(f"MiniMax H3 Image needs Diffusers {MINIMAX_DIFFUSERS} or newer. Update the engine in Model Library.")
+        self.manager = diffusers.ComponentsManager()
+        if device.startswith("cuda"):
+            self.manager.enable_auto_cpu_offload(device=device)
+        self.pipeline = diffusers.ModularPipeline.from_pretrained(
+            folder, components_manager=self.manager, local_files_only=True, trust_remote_code=False)
+        self.pipeline.load_components(dtype=torch.bfloat16, pretrained_model_name_or_path=folder, local_files_only=True)
+
+    def __call__(self, prompt, height, width, image=None):
+        options = {"image": image} if image is not None else {}
+        images = self.pipeline(prompt=prompt, height=height, width=width, output="images", **options)
+        return SimpleNamespace(images=images)
+
+
 def complete_models(kind=None):
     def complete_component(folder, key, value):
         part = folder / key
@@ -143,15 +220,17 @@ def complete_models(kind=None):
             continue
         for revision in repo.revisions:
             root = revision.snapshot_path
-            index = root / "model_index.json"
-            if not index.is_file():
-                index = root / "merged-model" / "model_index.json"
-            if not index.is_file():
-                continue
-            folder = index.parent
             try:
+                index = local_pipeline_index(root)
+                if not index.is_file():
+                    continue
+                folder = index.parent
                 config = json.loads(index.read_text(encoding="utf-8"))
-                parts = [(k, v) for k, v in config.items() if not k.startswith("_") and isinstance(v, list) and v and v[0] is not None and k != "safety_checker"]
+                if config.get("_class_name") == "MiniMaxH3ImagePipeline":
+                    continue
+                parts = [(key, value) for key, value in component_folders(config).items() if key != "safety_checker"]
+                if index.name == "modular_model_index.json" and not all_minimax_shards_present(folder, parts):
+                    continue
                 if parts and all(complete_component(folder, k, v) for k, v in parts):
                     model_kind = model_type(config.get("_class_name", ""))
                     if (kind is None or kind == model_kind) and (model_kind != "video" or config.get("_class_name") in SUPPORTED_VIDEO_CLASSES):
@@ -446,7 +525,7 @@ def pretrained_options(model_folder, model_id, dtype):
         options["safety_checker"] = None
     config = json.loads((folder / "model_index.json").read_text(encoding="utf-8"))
     weight_names = []
-    for part, value in config.items():
+    for part, value in component_folders(config).items():
         if part.startswith("_") or not isinstance(value, list) or not value or value[0] is None:
             continue
         component = folder / part
@@ -483,7 +562,9 @@ def load_model(model_id, kind="image"):
             raise RuntimeError("این مدل برای دستگاه دیگری نصب شده است؛ از بخش جست‌وجو نصب را برای دستگاه فعلی ادامه دهید.")
         if pipe is not None:
             old_key = (active_kind, active_model)
-            if keep_loaded and active_kind in ("image", "checkpoint") and selected_device.startswith("cuda"):
+            if isinstance(pipe, MiniMaxImageEngine):
+                loaded_pipelines.pop(old_key, None)
+            elif keep_loaded and active_kind in ("image", "checkpoint") and selected_device.startswith("cuda"):
                 pipe.to("cpu")
             elif not keep_loaded:
                 loaded_pipelines.pop(old_key, None)
@@ -517,7 +598,10 @@ def load_model(model_id, kind="image"):
         ensure_package("tiktoken", "tiktoken")
     if pipe is not None:
         old_key = (active_kind, active_model)
-        if keep_loaded:
+        old_is_modular = isinstance(pipe, MiniMaxImageEngine)
+        if old_is_modular:
+            loaded_pipelines.pop(old_key, None)
+        elif keep_loaded:
             if active_kind in ("image", "checkpoint") and selected_device.startswith("cuda"):
                 with contextlib.redirect_stdout(sys.stderr):
                     pipe.to("cpu")
@@ -525,13 +609,13 @@ def load_model(model_id, kind="image"):
             loaded_pipelines.pop(old_key, None)
         pipe = None
         active_model = None
-        if not keep_loaded:
+        if not keep_loaded or old_is_modular:
             gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
     if key in loaded_pipelines:
         loaded = loaded_pipelines[key]
-        if kind in ("image", "checkpoint") and selected_device.startswith("cuda") and "flux" not in type(loaded).__name__.lower():
+        if kind in ("image", "checkpoint") and selected_device.startswith("cuda") and not isinstance(loaded, MiniMaxImageEngine) and "flux" not in type(loaded).__name__.lower():
             with contextlib.redirect_stdout(sys.stderr):
                 loaded = loaded.to(selected_device)
     else:
@@ -542,13 +626,16 @@ def load_model(model_id, kind="image"):
                 manifest = models[model_id]
                 pipeline_class = StableDiffusionXLPipeline if manifest["family"] == "sdxl" else StableDiffusionPipeline
                 loaded = pipeline_class.from_single_file(manifest["file"], torch_dtype=dtype)
+            elif local_pipeline_index(Path(models[model_id])).name == "modular_model_index.json":
+                loaded = MiniMaxImageEngine(models[model_id], selected_device)
             else:
                 options = pretrained_options(models[model_id], model_id, dtype)
                 loaded = DiffusionPipeline.from_pretrained(models[model_id], **options)
-            if (kind == "video" or "flux" in type(loaded).__name__.lower()) and selected_device.startswith("cuda") and hasattr(loaded, "enable_model_cpu_offload"):
-                loaded.enable_model_cpu_offload(gpu_id=int(selected_device.split(":")[1]))
-            else:
-                loaded = loaded.to(selected_device)
+            if not isinstance(loaded, MiniMaxImageEngine):
+                if (kind == "video" or "flux" in type(loaded).__name__.lower()) and selected_device.startswith("cuda") and hasattr(loaded, "enable_model_cpu_offload"):
+                    loaded.enable_model_cpu_offload(gpu_id=int(selected_device.split(":")[1]))
+                else:
+                    loaded = loaded.to(selected_device)
         if hasattr(loaded, "enable_vae_slicing"):
             loaded.enable_vae_slicing()
         if kind == "video" and hasattr(loaded, "vae") and hasattr(loaded.vae, "enable_tiling"):
@@ -575,7 +662,9 @@ def aspect_dimensions(aspect_ratio, base):
 
 def image_settings(pipeline, model_id, aspect_ratio="1:1"):
     name = type(pipeline).__name__.lower()
-    if "flux2" in name:
+    if isinstance(pipeline, MiniMaxImageEngine):
+        settings = dict(width=1024, height=1024)
+    elif "flux2" in name:
         quick = "klein" in name and "base" not in model_id.lower()
         settings = dict(num_inference_steps=4 if quick else 24, guidance_scale=1.0 if quick else 4.0, width=1024, height=1024)
     elif "fluxfill" in name or "fluxcontrol" in name:
@@ -656,6 +745,8 @@ def generate(prompt, translated_override=None, warning_override=False, include_i
 
 
 def image_input_capability():
+    if isinstance(pipe, MiniMaxImageEngine):
+        return {"supported": True, "reason": "MiniMax H3 Image · Modular Diffusers"}
     if active_kind == "sdcpp":
         supports = sdcpp_models().get(active_model, {}).get("recipe") in SDCPP_EDIT_RECIPES
         return {"supported": supports, "reason": "stable-diffusion.cpp · Reference image" if supports else "این مدل ورودی عکس ندارد."}
@@ -701,7 +792,7 @@ def edit_image(prompt, image_data_url, strength=0.65, aspect_ratio="1:1", tempor
     if not translated:
         raise RuntimeError("توضیح ویرایش خالی است.")
     original_parameters = inspect.signature(pipe.__call__).parameters
-    native_reference = "mask_image" in original_parameters or "control_image" in original_parameters or "flux2" in type(pipe).__name__.lower()
+    native_reference = isinstance(pipe, MiniMaxImageEngine) or "mask_image" in original_parameters or "control_image" in original_parameters or "flux2" in type(pipe).__name__.lower()
     if native_reference:
         editor = pipe
     else:
@@ -812,6 +903,8 @@ def batch_generate(topic, count, split_cpu=False, aspect_ratio="1:1", metadata=N
         raise RuntimeError("تعداد عکس باید حداقل ۱ باشد.")
     if active_kind not in ("image", "checkpoint", "sdcpp") or (active_kind in ("image", "checkpoint") and pipe is None) or (active_kind == "sdcpp" and active_model not in sdcpp_models()):
         raise RuntimeError("اول یک مدل عکس‌ساز را انتخاب کنید.")
+    if split_cpu and isinstance(pipe, MiniMaxImageEngine):
+        raise RuntimeError("Use a single device for MiniMax H3 Image batches; the model uses its own component offloading.")
     if split_cpu and active_kind in ("sdcpp", "checkpoint"):
         raise RuntimeError("تقسیم CPU/GPU برای موتورهای تک‌فایلی فعلاً پشتیبانی نمی‌شود؛ تیک تقسیم کار را بردارید.")
     if split_cpu and not selected_device.startswith("cuda"):
@@ -1160,7 +1253,7 @@ def search(query, kind="image", image_only=False):
             category = "sdcpp"
         elif any(name.lower().endswith(".gguf") for name in names):
             category = "gguf"
-        elif "model_index.json" in names:
+        elif "model_index.json" in names or "modular_model_index.json" in names:
             video_name = any(term in m.id.lower() for term in ("hunyuanvideo", "cogvideo", "text2world", "predict2.5", "ltx-2", "wan2", "mochi-1", "allegro"))
             category = "video" if m.pipeline_tag == "text-to-video" or video_name else "image"
         elif "merged-model/model_index.json" in names:
@@ -1182,7 +1275,7 @@ def search(query, kind="image", image_only=False):
 
 def missing_pipeline_parts(names, config, prefix=""):
     missing = []
-    for part, value in config.items():
+    for part, value in component_folders(config).items():
         if part.startswith("_") or part == "safety_checker" or not isinstance(value, list) or not value or value[0] is None:
             continue
         files = [name for name in names if name.startswith(prefix + part + "/")]
@@ -1255,6 +1348,7 @@ def model_info(model_id, requested_kind=None, variant=None):
     plan = []
     requirements = []
     variants = []
+    upgrade = None
     revisions = {model_id: info.sha}
     if requested_kind != "checkpoint" and not is_lora and sdcpp_recipe(model_id, names):
         try:
@@ -1274,22 +1368,27 @@ def model_info(model_id, requested_kind=None, variant=None):
             compatibility, reason = "sdcpp", f"آمادهٔ نصب با موتور؛ {len(files)} فایل لازم بررسی شد"
         except Exception as error:
             compatibility, reason = "review", f"فایل‌های لازم برای موتور کامل نیستند: {error}"
-    elif (has_index or has_merged_index) and requested_kind != "checkpoint":
+    elif (has_index or has_merged_index or "modular_model_index.json" in names) and requested_kind != "checkpoint":
         try:
             import diffusers
-            index_name = "model_index.json" if has_index else "merged-model/model_index.json"
-            index_file = retry_call(lambda: hf_hub_download(model_id, index_name, revision=info.sha,
-                                    cache_dir=MODEL_CACHE, etag_timeout=15), "بررسی ساختار مدل", model_id, attempts=2)
+            index_name, index_file = retry_call(lambda: remote_pipeline_index(model_id, names, info.sha),
+                                                 "بررسی ساختار مدل", model_id, attempts=2)
             config = json.loads(Path(index_file).read_text(encoding="utf-8"))
             class_name = config.get("_class_name", "")
             image_input = class_name in ("StableDiffusionPipeline", "StableDiffusionXLPipeline", "FluxPipeline", "FluxKontextPipeline", "FluxFillPipeline", "FluxControlPipeline", "Flux2Pipeline", "Flux2KleinPipeline", "QwenImagePipeline", "QwenImage21Pipeline") or "Img2Img" in class_name
             kind = model_type(class_name)
-            parts = [key for key, value in config.items() if not key.startswith("_") and
-                     isinstance(value, list) and value and value[0] is not None]
-            selected = files_for_pipeline(info.siblings, parts, "merged-model/" if has_merged_index and not has_index else "")
+            modular = is_minimax_image(config)
+            image_input = image_input or modular
+            prefix = "merged-model/" if index_name.startswith("merged-model/") else ""
+            selected = files_for_pipeline(info.siblings, component_folders(config), prefix, index_name)
             has_weights = any(name.endswith((".safetensors", ".bin")) for name in selected)
-            missing_parts = missing_pipeline_parts(names, config, "merged-model/" if has_merged_index and not has_index else "")
-            if not hasattr(diffusers, class_name):
+            missing_parts = missing_pipeline_parts(names, config, prefix)
+            if modular and not minimax_engine_ready(diffusers):
+                reason = ""
+                upgrade = {"installed": diffusers.__version__, "minimum": MINIMAX_DIFFUSERS, "profile": "minimax-h3"}
+            elif class_name == "MiniMaxH3ImagePipeline":
+                reason = "این مخزن قالب قدیمی H3 را دارد. مدل رسمی MiniMaxAI/MiniMax-H3-Image نسخهٔ Modular را دارد."
+            elif not modular and not hasattr(diffusers, class_name):
                 reason = f"کلاس {class_name or 'نامشخص'} در نسخهٔ فعلی Diffusers نصب نیست"
             elif "prior" in class_name.lower():
                 reason = "این بستهٔ کمکی به یک مدل پایه و مسیر مخصوص ترکیب نیاز دارد"
@@ -1299,14 +1398,20 @@ def model_info(model_id, requested_kind=None, variant=None):
                 reason = "اجزای مدل کامل نیست: " + ", ".join(missing_parts or ["weights"])
             else:
                 download_kind = kind
-                reason = f"آمادهٔ دانلود با موتور {class_name}؛ {len(selected)} فایل لازم"
-                requirements = ["Diffusers", "PyTorch"]
+                reason = "" if modular else f"آمادهٔ دانلود با موتور {class_name}؛ {len(selected)} فایل لازم"
+                requirements = [f"Modular Diffusers ≥ {MINIMAX_DIFFUSERS}" if modular else "Diffusers", "PyTorch"]
                 if "T5" in json.dumps(config) or "CogVideoX" in class_name:
                     requirements.append("SentencePiece")
                 root = Path(index_file).parent.parent if index_name.startswith("merged-model/") else Path(index_file).parent
                 part_root = MODEL_CACHE / ".nocturne-parts" / model_id / info.sha
                 sizes = {file.rfilename: file.size for file in info.siblings}
                 plan = [(sizes[name], root / name, part_root / (name + ".part")) for name in selected]
+            if upgrade and has_weights and not missing_parts:
+                requirements = [f"Modular Diffusers ≥ {MINIMAX_DIFFUSERS}", "PyTorch"]
+                root = Path(index_file).parent
+                parts_path = MODEL_CACHE / ".nocturne-parts" / model_id / info.sha
+                sizes = {file.rfilename: file.size for file in info.siblings}
+                plan = [(sizes[name], root / name, parts_path / (name + ".part")) for name in selected]
             compatibility = "diffusers" if download_kind else "review"
             checkpoint = checkpoint_candidate(info)
             if not download_kind and checkpoint:
@@ -1366,14 +1471,14 @@ def model_info(model_id, requested_kind=None, variant=None):
             "checkpoint_available": checkpoint_candidate(info) is not None,
             "image_input": image_input, "download_bytes": download_bytes,
             "remaining_bytes": remaining_bytes, "requirements": requirements,
-            "variants": variants, "revisions": revisions, **summary,
+            "variants": variants, "revisions": revisions, "upgrade": upgrade, **summary,
             "memory_gib": ([round(download_bytes / 1024**3 + overhead, 1) for overhead in (2, 8)]
                            if download_bytes and download_kind in ("image", "checkpoint", "sdcpp") else None),
             "reason": reason}
 
 
-def files_for_pipeline(siblings, parts, prefix=""):
-    selected = {prefix + "model_index.json"}
+def files_for_pipeline(siblings, parts, prefix="", index_name=None):
+    selected = {index_name or prefix + "model_index.json"}
     ignored_suffixes = (".ckpt", ".pt", ".pth", ".h5", ".onnx", ".msgpack", ".gguf")
     for part in parts:
         files = [s.rfilename for s in siblings if s.rfilename.startswith(prefix + part + "/")]
@@ -1875,23 +1980,23 @@ def download(model_id, kind="image", revisions=None, variant=None, repair=False)
     revision = revisions.get(model_id) or download_pin(model_id)
     info = retry_call(lambda: api.model_info(model_id, revision=revision, files_metadata=True, timeout=30), "بررسی مخزن", model_id)
     names = {s.rfilename for s in info.siblings}
-    index_name = "model_index.json" if "model_index.json" in names else "merged-model/model_index.json"
-    if index_name not in names:
-        raise RuntimeError("این مخزن فایل model_index.json ندارد و مدل کامل قابل اجرای برنامه نیست.")
-    index_file = retry_call(lambda: hf_hub_download(model_id, index_name, revision=info.sha,
-                            cache_dir=MODEL_CACHE, etag_timeout=30), "دریافت مشخصات مدل", model_id)
+    index_name, index_file = retry_call(lambda: remote_pipeline_index(model_id, names, info.sha),
+                                         "دریافت مشخصات مدل", model_id)
     config = json.loads(Path(index_file).read_text(encoding="utf-8"))
     class_name = config.get("_class_name", "")
-    if not hasattr(diffusers, class_name) or "prior" in class_name.lower():
+    if is_minimax_image(config):
+        if not minimax_engine_ready(diffusers):
+            raise RuntimeError(f"MiniMax H3 Image needs Modular Diffusers {MINIMAX_DIFFUSERS} or newer.")
+    elif not hasattr(diffusers, class_name) or "prior" in class_name.lower():
         raise RuntimeError("این مدل با موتور مستقل فعلی سازگار نیست.")
     is_video = model_type(class_name) == "video"
     if (kind == "video") != is_video:
         raise RuntimeError("نوع این مدل با بخش انتخاب‌شده سازگار نیست.")
     if kind == "video" and class_name not in SUPPORTED_VIDEO_CLASSES:
         raise RuntimeError("این خانوادهٔ ویدیوساز هنوز در برنامه پشتیبانی نمی‌شود.")
-    parts = [k for k, v in config.items() if not k.startswith("_") and isinstance(v, list) and v and v[0] is not None]
+    parts = component_folders(config)
     prefix = "merged-model/" if index_name.startswith("merged-model/") else ""
-    selected_files = files_for_pipeline(info.siblings, parts, prefix)
+    selected_files = files_for_pipeline(info.siblings, parts, prefix, index_name)
     missing_parts = missing_pipeline_parts(names, config, prefix)
     if missing_parts:
         raise RuntimeError("این مدل پوشه‌های لازم را ندارد: " + ", ".join(missing_parts) + ". اگر فایل کامل Safetensors دارد، دکمهٔ بررسی را بزنید.")

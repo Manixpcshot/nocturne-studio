@@ -1,4 +1,8 @@
 export const additionalTranslations: Record<string, string> = {
+  "به‌روزرسانی موتور لازم است": "Engine update required",
+  "به‌روزرسانی و بررسی دوباره": "Update and recheck",
+  "سازگار با موتور برنامه": "Compatible with the installed engine",
+  "دسترسی مخزن لازم است": "Repository access required",
   "جزئیات دسترسی": "Access details",
   "انتخاب نسخهٔ دیگر": "Choose another variant",
   "ماسک سیاه‌وسفید برای FLUX Fill": "Black-and-white mask for FLUX Fill",

@@ -13,7 +13,7 @@ import { mountLibrary } from './library';
 import { mountWorkspacePreferences, pageInfo, rememberPage, startPage, workspacePages } from './workspace-ui';
 import brandIcon from './assets/nocturne-icon.png';
 import './redesign.css';
-import { mountDownloadCenter, type DownloadJob, type DownloadKind, type DownloadPlan, type Transfer } from './downloads';
+import { mountDownloadCenter, type DownloadJob, type DownloadKind, type DownloadPlan, type EngineUpgrade, type Transfer } from './downloads';
 import { hideStartup, showStartup, startupFailed } from './startup';
 import './projects.css';
 import { activateProject, addProject, buildCombinations, newId, pendingQueue, persistQueue, projectId, projects, relatedImages, scopedKey, stored, type QueueJob } from './projects';
@@ -102,7 +102,7 @@ let searchVisibleCount = 80;
 let searchCategoryFilter: Model['category'] | 'all' = 'all';
 let favoriteModels = new Set<string>(JSON.parse(localStorage.getItem('nocturne-favorite-models') || '[]'));
 let showFavoritesOnly = false;
-type Inspection = { size_gb: number | null; files: number; parameters: number | null; compatibility: string; download_kind: string | null; checkpoint_available: boolean; reason: string; gated: boolean; image_input?: boolean | null; download_bytes?: number | null; remaining_bytes?: number | null; requirements?: string[]; memory_gib?: [number, number] | null };
+type Inspection = { upgrade?: EngineUpgrade | null; size_gb: number | null; files: number; parameters: number | null; compatibility: string; download_kind: string | null; checkpoint_available: boolean; reason: string; gated: boolean; image_input?: boolean | null; download_bytes?: number | null; remaining_bytes?: number | null; requirements?: string[]; memory_gib?: [number, number] | null };
 const inspections = new Map<string, Inspection>();
 let gallery: GalleryItem[] = [];
 const favoriteImagesKey = 'nocturne-favorite-images';
@@ -640,6 +640,7 @@ function render() {
     partials: (job, expected) => call(expected == null ? 'download_parts_info' : 'download_parts_delete',
       { model_id: job.id, kind: job.kind, folder: job.folder, revisions: job.payload.revisions, expected_bytes: expected }),
     open: openDownloaded, error: message => toast(message, true),
+    upgrade: () => updateEngine(true),
     notify: message => { void invoke('notify_image_ready', { message }).catch(() => {}); },
   });
   mountChat({ call, queueDownload: (id, payload, size) => downloadCenter.preview({ id, kind: 'chat', payload, size }), busy: () => busy, setBusy, view: setView, symbol: icon('Sparkles', 20) });
@@ -762,6 +763,7 @@ async function inspectModel(id: string) {
   const button = row.querySelector<HTMLButtonElement>('[data-inspect]')!;
   const details = row.querySelector<HTMLElement>('.inspection-details')!;
   button.disabled = true;
+  details.setAttribute('aria-live', 'polite');
   details.textContent = 'در حال بررسی فرادادهٔ مخزن...';
   try {
     const info = await call<Inspection>('info', { model_id: id });
@@ -775,7 +777,7 @@ async function inspectModel(id: string) {
   } finally { button.disabled = false; }
 }
 
-function modelPreflight(info?: Inspection) {
+function modelPreflight(id: string, info?: Inspection) {
   if (!info) return '';
   const number = new Intl.NumberFormat(language === 'en' ? 'en-US' : 'fa-IR');
   const fields = [
@@ -786,7 +788,15 @@ function modelPreflight(info?: Inspection) {
     ['برآورد حافظهٔ کاری', info.memory_gib ? info.memory_gib.map(value => number.format(value)).join('–') + ' GiB' : 'نامشخص'],
     ['پارامترها', info.parameters == null ? 'نامشخص' : number.format(info.parameters)],
   ];
-  return `<dl class="model-preflight">${fields.map(([label, value]) => `<div><dt>${label}</dt><dd>${safe(value)}</dd></div>`).join('')}</dl><span>${safe(info.reason)}</span>`;
+  const title = info.upgrade ? 'به‌روزرسانی موتور لازم است' : info.gated ? 'دسترسی مخزن لازم است'
+    : info.download_kind ? 'سازگار با موتور برنامه' : 'نیازمند بررسی';
+  const upgrade = info.upgrade ? `<button class="small-button" type="button" data-engine-upgrade="${safe(id)}" data-work>به‌روزرسانی و بررسی دوباره</button>` : '';
+  const detail = info.upgrade ? `<p dir="ltr">Diffusers ${safe(info.upgrade.installed)} → ≥ ${safe(info.upgrade.minimum)}</p>` : info.reason ? `<p dir="auto">${safe(info.reason)}</p>` : '';
+  return `<section class="engine-review ${info.upgrade || !info.download_kind ? 'engine-review-warning' : 'engine-review-ready'}">
+    <div class="engine-review-heading"><div><strong>${title}</strong>${detail}</div>${upgrade}</div>
+    <dl class="model-preflight">${fields.map(([label, value]) => `<div><dt>${label}</dt><dd>${safe(value)}</dd></div>`).join('')}</dl>
+  </section>`;
+
 }
 
 function renderSearch() {
@@ -806,13 +816,30 @@ function renderSearch() {
     const canPreview = gated || (downloadable && (!installed || kind === 'sdcpp'));
     const downloadLabel = gated ? 'جزئیات دسترسی' : installed ? (kind === 'sdcpp' ? 'انتخاب نسخهٔ دیگر' : 'نصب شده')
       : kind === 'sdcpp' ? 'نصب با موتور' : downloadable ? 'بررسی و دانلود' : inspection ? 'پشتیبانی نمی‌شود' : 'نیازمند بررسی';
-    return `<div class="search-result" data-model-id="${safe(m.id)}"><button class="favorite-button ${favoriteModels.has(m.id) ? 'is-favorite' : ''}" data-favorite="${safe(m.id)}" title="علاقه‌مندی">${icon('Star', 17)}</button><div class="model-symbol">${icon(m.category === 'video' ? 'Film' : 'Aperture', 19)}</div><div class="search-meta"><strong>${safe(m.id)}</strong><small>${safe(labels[m.category])} · ${m.downloads.toLocaleString('fa-IR')} دانلود</small></div><span class="size-label">${inspections.get(m.id)?.size_gb == null ? 'حجم: بررسی نشده' : `حجم: ${inspections.get(m.id)!.size_gb!.toLocaleString('fa-IR')} GB`}</span><button class="small-button inspect-button" data-inspect="${safe(m.id)}">${inspection ? 'بررسی دوباره' : 'بررسی'}</button><button class="small-button download-button" data-download="${safe(m.id)}" data-kind="${kind || m.category}" data-static-disabled="${canPreview ? '0' : '1'}" data-work ${canPreview ? '' : 'disabled'}>${downloadLabel}</button>${inspection?.checkpoint_available && kind !== 'checkpoint' ? `<button class="small-button" data-checkpoint-download="${safe(m.id)}" data-work ${checkpointModels.includes(m.id) ? 'disabled' : ''}>${checkpointModels.includes(m.id) ? 'تک‌فایل نصب شده' : 'دریافت نسخهٔ تک‌فایل'}</button>` : ''}<div class="inspection-details">${modelPreflight(inspection)}</div></div>`;
+    return `<div class="search-result" data-model-id="${safe(m.id)}"><button class="favorite-button ${favoriteModels.has(m.id) ? 'is-favorite' : ''}" data-favorite="${safe(m.id)}" title="علاقه‌مندی">${icon('Star', 17)}</button><div class="model-symbol">${icon(m.category === 'video' ? 'Film' : 'Aperture', 19)}</div><div class="search-meta"><strong>${safe(m.id)}</strong><small>${safe(labels[m.category])} · ${m.downloads.toLocaleString('fa-IR')} دانلود</small></div><span class="size-label">${inspections.get(m.id)?.size_gb == null ? 'حجم: بررسی نشده' : `حجم: ${inspections.get(m.id)!.size_gb!.toLocaleString('fa-IR')} GB`}</span><button class="small-button inspect-button" data-inspect="${safe(m.id)}">${inspection ? 'بررسی دوباره' : 'بررسی'}</button><button class="small-button download-button" data-download="${safe(m.id)}" data-kind="${kind || m.category}" data-static-disabled="${canPreview ? '0' : '1'}" data-work ${canPreview ? '' : 'disabled'}>${downloadLabel}</button>${inspection?.checkpoint_available && kind !== 'checkpoint' ? `<button class="small-button" data-checkpoint-download="${safe(m.id)}" data-work ${checkpointModels.includes(m.id) ? 'disabled' : ''}>${checkpointModels.includes(m.id) ? 'تک‌فایل نصب شده' : 'دریافت نسخهٔ تک‌فایل'}</button>` : ''}<div class="inspection-details">${modelPreflight(m.id, inspection)}</div></div>`;
   }).join('') + (results.length > searchVisibleCount ? `<button id="more-models" class="small-button more-models">نمایش بیشتر · ${Math.min(results.length - searchVisibleCount, 80).toLocaleString('fa-IR')} مدل دیگر از ${results.length.toLocaleString('fa-IR')}</button>` : `<p class="search-total">${results.length.toLocaleString('fa-IR')} مدل نمایش داده شد</p>`) : '<div class="search-placeholder">مدلی در این دسته پیدا نشد.</div>');
   target.querySelector<HTMLButtonElement>('#more-models')?.addEventListener('click', () => { searchVisibleCount += 80; renderSearch(); });
   target.querySelectorAll<HTMLButtonElement>('[data-result-category]').forEach(button => button.onclick = () => { searchCategoryFilter = button.dataset.resultCategory as typeof searchCategoryFilter; searchVisibleCount = 80; renderSearch(); });
   document.querySelectorAll<HTMLButtonElement>('[data-download]').forEach(el => el.onclick = () => downloadModel(el.dataset.download!, el.dataset.kind!));
   document.querySelectorAll<HTMLButtonElement>('#search-results [data-favorite]').forEach(el => el.onclick = () => toggleFavorite(el.dataset.favorite!));
   document.querySelectorAll<HTMLButtonElement>('[data-inspect]').forEach(el => el.onclick = () => void inspectModel(el.dataset.inspect!));
+  target.querySelectorAll<HTMLButtonElement>('[data-engine-upgrade]').forEach(button => button.onclick = async () => {
+    const id = button.dataset.engineUpgrade!;
+    const label = button.textContent;
+    button.textContent = language === 'en' ? 'Updating…' : 'در حال به‌روزرسانی…';
+    const result = await updateEngine(true);
+    if (result === true) await inspectModel(id);
+    else if (button.isConnected) {
+      button.textContent = label;
+      const oldError = button.closest('.engine-review')?.querySelector('.engine-review-error');
+      oldError?.remove();
+      const error = document.createElement('p');
+      error.className = 'engine-review-error';
+      error.setAttribute('role', 'alert');
+      error.textContent = result;
+      button.closest('.engine-review-heading')?.after(error);
+    }
+  });
   document.querySelectorAll<HTMLButtonElement>('[data-checkpoint-download]').forEach(el => el.onclick = () => void downloadModel(el.dataset.checkpointDownload!, 'checkpoint'));
   refreshIcons();
 }
@@ -1392,21 +1419,36 @@ async function editImage() {
   finally { setBusy(false); }
 }
 
-async function updateEngine() {
-  if (busy) return;
+async function updateEngine(minimax = false): Promise<true | string> {
+  if (busy) return language === 'en' ? 'Wait for the current task to finish.' : 'صبر کن کار فعلی تمام شود.';
+  if (downloadCenter.running()) {
+    const message = language === 'en' ? 'Pause the active downloads before updating the engine.' : 'پیش از به‌روزرسانی موتور، دانلودهای فعال را مکث کن.';
+    toast(message, true);
+    return message;
+  }
   const status = document.querySelector('#engine-status')!;
   setBusy(true, 'در حال به‌روزرسانی موتور Diffusers...');
   status.textContent = 'در حال دریافت نسخهٔ تازهٔ موتور...';
   let unlisten: (() => void) | null = null;
   try {
     unlisten = await listen<{ message: string }>('setup-progress', event => { status.textContent = event.payload.message; });
-    const result = await invoke<{ version: string }>('update_diffusers_engine');
+    activeModel = null;
+    loadedModels = [];
+    renderModels();
+    const result = await invoke<{ version: string }>('update_diffusers_engine', { minimax });
+    selectedDevice = devices.some(device => device.id === selectedDevice) ? selectedDevice : 'cpu';
+    await call('device', { device: selectedDevice });
+    await call('cache_mode', { enabled: keepLoaded });
     inspections.clear();
+    renderModels();
+    renderSearch();
     status.textContent = `Diffusers ${result.version} آماده است. مدل‌های دلخواهت را دوباره بررسی کن.`;
-    toast(`موتور Diffusers به نسخهٔ ${result.version} به‌روز شد.`);
+    toast(language === 'en' ? `Diffusers ${result.version} is ready.` : `موتور Diffusers به نسخهٔ ${result.version} به‌روز شد.`);
+    return true;
   } catch (error) {
     status.textContent = `به‌روزرسانی ناموفق بود: ${String(error)}`;
     toast(String(error), true);
+    return String(error);
   } finally {
     unlisten?.();
     setBusy(false);

@@ -143,6 +143,7 @@ async fn setup_status() -> Result<Value, String> {
 async fn update_diffusers_engine(
     app: AppHandle,
     state: State<'_, Arc<Mutex<Option<Backend>>>>,
+    minimax: Option<bool>,
 ) -> Result<Value, String> {
     let state = Arc::clone(&state);
     tauri::async_runtime::spawn_blocking(move || {
@@ -152,20 +153,28 @@ async fn update_diffusers_engine(
         }
         let python = python_executable().ok_or("Python 3.13 پیدا نشد. راه‌اندازی اولیه را اجرا کنید.")?;
         emit_setup(&app, "در حال به‌روزرسانی موتور Diffusers...");
+        let minimax = minimax.unwrap_or(false);
+        let package = if minimax { "diffusers>=0.43.0" } else { "diffusers" };
         let output = Command::new(&python)
-            .args(["-m", "pip", "install", "--upgrade", "--timeout", "30", "--retries", "2", "diffusers"])
+            .args(["-m", "pip", "install", "--upgrade", "--timeout", "30", "--retries", "2", package])
             .creation_flags(0x08000000)
             .output().map_err(|e| format!("اجرای به‌روزرسانی ناموفق بود: {e}"))?;
         if !output.status.success() {
             let error = String::from_utf8_lossy(&output.stderr);
             return Err(format!("به‌روزرسانی Diffusers ناموفق بود: {}", error.chars().rev().take(900).collect::<String>().chars().rev().collect::<String>()));
         }
+        let check = if minimax {
+            "from diffusers import ModularPipeline, ComponentsManager, MiniMaxH3ImageTransformer2DModel; import diffusers; print(diffusers.__version__)"
+        } else {
+            "import diffusers; print(diffusers.__version__)"
+        };
         let version = Command::new(&python)
-            .args(["-c", "import diffusers; print(diffusers.__version__)"])
+            .args(["-c", check])
             .creation_flags(0x08000000)
             .output().map_err(|e| format!("بررسی موتور تازه ناموفق بود: {e}"))?;
         if !version.status.success() {
-            return Err("Diffusers نصب شد، اما اجرای آن ناموفق بود. پیش‌نیازهای Python را بررسی کنید.".into());
+            let error = String::from_utf8_lossy(&version.stderr);
+            return Err(format!("Diffusers نصب شد، اما اجرای آن ناموفق بود: {}", error.chars().rev().take(900).collect::<String>().chars().rev().collect::<String>()));
         }
         let version = String::from_utf8_lossy(&version.stdout).trim().to_string();
         emit_setup(&app, "موتور Diffusers به‌روز شد.");
