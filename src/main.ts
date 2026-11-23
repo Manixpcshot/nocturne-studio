@@ -13,10 +13,14 @@ import { mountLibrary } from './library';
 import { mountWorkspacePreferences, pageInfo, rememberPage, startPage, workspacePages } from './workspace-ui';
 import brandIcon from './assets/nocturne-icon.png';
 import './redesign.css';
+import './projects.css';
+import { activateProject, addProject, buildCombinations, newId, pendingQueue, persistQueue, projectId, projects, relatedImages, scopedKey, stored, type QueueJob } from './projects';
+import { matrixDialog, projectBar, projectDialog, queueTools } from './project-ui';
 
 type ApiResult<T> = { ok: true; data: T } | { ok: false; error: string };
 type Model = { id: string; downloads: number; likes: number; category: 'image' | 'video' | 'adapter' | 'sdcpp' | 'checkpoint' | 'gguf' | 'other'; pipeline_tag: string; gated: boolean };
-type GalleryItem = { name: string; thumbnail: string; date: string; prompt: string; original_prompt: string; model: string };
+type ImageMetadata = { project_id?: string; parent_image?: string; aspect_ratio?: string; mode?: 'edit'; strength?: number };
+type GalleryItem = ImageMetadata & { name: string; thumbnail: string; date: string; prompt: string; original_prompt: string; model: string };
 type Device = { id: string; name: string };
 type LoadedModel = { id: string; kind: string; active: boolean };
 type Status = { models: string[]; video_models: string[]; sdcpp_models: string[]; checkpoint_models: string[]; adapters: string[]; active: string | null; active_kind: string; loaded_models: LoadedModel[]; cache_enabled: boolean; devices: Device[]; device: string; images: number; model_folder: string; output_folder: string };
@@ -57,11 +61,10 @@ let batchGpuDone = 0;
 let batchCpuDone = 0;
 let queueRunning = false;
 let queueCancelled = false;
-type QueueJob = { model_id: string; count: number; prompt: string; aspect_ratio: string; variations: boolean };
 const queueDraftKey = 'nocturne-batch-queue-v2';
 function readQueueDraft(): QueueJob[] {
   try {
-    const saved: unknown = JSON.parse(localStorage.getItem(queueDraftKey) || 'null');
+    const saved: unknown = JSON.parse(localStorage.getItem(scopedKey(queueDraftKey)) || 'null');
     if (Array.isArray(saved)) {
       return saved.filter(item => item && typeof item.model_id === 'string' && typeof item.prompt === 'string' &&
         Number.isSafeInteger(item.count) && typeof item.variations === 'boolean' &&
@@ -77,7 +80,7 @@ let queueDraftWarning = false;
 
 function saveQueueDraft() {
   try {
-    localStorage.setItem(queueDraftKey, JSON.stringify(queueJobs));
+    localStorage.setItem(scopedKey(queueDraftKey), JSON.stringify(queueJobs));
     queueDraftWarning = false;
   } catch {
     if (!queueDraftWarning) toast('The queue draft could not be saved. Browser storage is full.', true);
@@ -98,14 +101,19 @@ let searchVisibleCount = 80;
 let searchCategoryFilter: Model['category'] | 'all' = 'all';
 let favoriteModels = new Set<string>(JSON.parse(localStorage.getItem('nocturne-favorite-models') || '[]'));
 let showFavoritesOnly = false;
-type Inspection = { size_gb: number | null; files: number; parameters: number | null; compatibility: string; download_kind: string | null; checkpoint_available: boolean; reason: string; gated: boolean; image_input?: boolean | null };
+type Inspection = { size_gb: number | null; files: number; parameters: number | null; compatibility: string; download_kind: string | null; checkpoint_available: boolean; reason: string; gated: boolean; image_input?: boolean | null; download_bytes?: number | null; remaining_bytes?: number | null; requirements?: string[]; memory_gib?: [number, number] | null };
 const inspections = new Map<string, Inspection>();
 let gallery: GalleryItem[] = [];
 const favoriteImagesKey = 'nocturne-favorite-images';
 const promptPresetsKey = 'nocturne-prompt-presets';
 const favoriteImages = new Set<string>(JSON.parse(localStorage.getItem(favoriteImagesKey) || '[]'));
 type PromptPreset = { name: string; prompt: string; aspect: string };
-let promptPresets: PromptPreset[] = JSON.parse(localStorage.getItem(promptPresetsKey) || '[]');
+let promptPresets = stored<PromptPreset[]>(scopedKey(promptPresetsKey), []);
+let parentImage = '';
+let viewerSettings: Partial<GalleryItem> = {};
+let currentImageMetadata: Partial<GalleryItem> = {};
+let versionFilter = '';
+const studioDraftKey = 'nocturne-studio-draft';
 let showFavoriteImages = false;
 type StudioMode = 'create' | 'edit' | 'compare';
 let studioMode: StudioMode = 'create';
@@ -211,7 +219,7 @@ function applyLanguage() {
   const walker = document.createTreeWalker(app, NodeFilter.SHOW_TEXT);
   let node: Node | null;
   while ((node = walker.nextNode())) {
-    if (node.parentElement?.closest('#chat-threads, #chat-artifact-code, .cache-path, textarea, .chat-prose, .chat-file-names, .code-box pre, [data-queue-model] option[value]:not([value=""]), #preset-select option:not([value=""])')) continue;
+    if (node.parentElement?.closest('#project-select option:not([value=""]), #project-reference-select option:not([value=""]), #matrix-models label, #matrix-preview label, #chat-threads, #chat-artifact-code, .cache-path, textarea, .chat-prose, .chat-file-names, .code-box pre, [data-queue-model] option[value]:not([value=""]), #preset-select option:not([value=""])')) continue;
     const original = node.textContent?.trim() || '';
     if (Object.hasOwn(translations, original)) node.textContent = node.textContent!.replace(original, translations[original]);
     else if (node.parentElement?.matches('.queue-position, .queue-job-progress, #queue-jobs-count, #queue-details')) {
@@ -230,12 +238,15 @@ function applyLanguage() {
     }
   }
   const locale = language === 'en' ? 'en-US' : 'fa-IR';
-  const counts = { 'gallery-count': gallery.length, 'voice-count': voices.length };
+  const counts = { 'gallery-count': projectId ? gallery.filter(item => item.project_id === projectId).length : gallery.length, 'voice-count': voices.length };
   for (const [id, count] of Object.entries(counts)) {
     const badge = document.getElementById(id);
     const text = count.toLocaleString(locale);
     if (badge && badge.textContent !== text) badge.textContent = text;
   }
+  const anyProject = document.querySelector<HTMLOptionElement>('#project-select option[value=""]');
+  const groupLabel = language === 'en' ? 'All projects' : 'همهٔ پروژه‌ها';
+  if (anyProject && anyProject.textContent !== groupLabel) anyProject.textContent = groupLabel;
   const settings = document.querySelector('#workspace-settings-open');
   const label = language === 'en' ? 'Settings' : 'تنظیمات';
   settings?.setAttribute('aria-label', label);
@@ -268,7 +279,7 @@ function applyPrivacy() {
   root.classList.toggle('privacy-hide-compare', hideCompare || privacyCover);
   root.classList.toggle('privacy-hide-gallery', hideGallery || privacyCover);
   root.classList.toggle('privacy-cover', privacyCover);
-  if (privacyCover) document.querySelector<HTMLDialogElement>('#workspace-command[open]')?.close();
+  if (privacyCover) document.querySelectorAll<HTMLDialogElement>('dialog[open]').forEach(dialog => dialog.close());
 }
 let busy = false;
 let cancellingDownload = false;
@@ -361,6 +372,7 @@ function notifyCollection(count: number) {
 function setBusy(value: boolean, label = '') {
   busy = value;
   document.querySelectorAll<HTMLButtonElement>('button[data-work]').forEach(button => button.disabled = value || button.dataset.staticDisabled === '1');
+  document.querySelector<HTMLSelectElement>('#project-select')!.disabled = value;
   const status = document.querySelector<HTMLElement>('#work-status')!;
   const ready = language === 'en' ? english['آمادهٔ کار'] : 'آمادهٔ کار';
   status.title = value ? label : "";
@@ -453,6 +465,12 @@ function organizeStudioView() {
   const compare = view.querySelector('.compare-panel')!;
   const edit = view.querySelector('.edit-panel')!;
   settings.before(edit);
+  edit.querySelector('.edit-grid')!.insertAdjacentHTML('afterend',
+    `<div id="project-references" class="reference-picker" hidden>
+      <label for="project-reference-select">عکس‌های مرجع پروژه</label>
+      <select id="project-reference-select"></select>
+      <button type="button" id="project-load-reference" class="small-button" data-work>بازکردن عکس مرجع پروژه</button>
+    </div>`);
   settings.after(compare);
   const compareResults = view.querySelector('#compare-results')!;
   compareResults.innerHTML = '<p class="comparison-empty">نتیجهٔ دو مدل اینجا نمایش داده می‌شود.</p>';
@@ -549,6 +567,7 @@ function organizeBatchStudio() {
   const queue = view.querySelector('.queue-card')!;
   modes.after(queue);
   queue.querySelector('.card-heading h2')!.textContent = 'Job queue';
+  queue.querySelector('.queue-hint')!.insertAdjacentHTML('afterend', queueTools);
   queue.querySelector('.queue-hint')!.textContent = 'Set a prompt, model, count and aspect ratio for each job. Drafts are saved on this device.';
   queue.querySelector('#queue-add')!.textContent = '+ Add job';
   queue.querySelector('.queue-total')!.innerHTML = '<span id="queue-jobs-count"></span><span><b id="queue-total">0</b> images total</span>';
@@ -592,6 +611,7 @@ function render() {
       <main class="main">
         <header class="topbar">
           <div class="crumb"><span id="page-group">استودیو</span><strong id="page-title">ساخت تصویر</strong></div>
+          ${projectBar}
           <div class="top-actions">
             <button type="button" id="workspace-command-open" class="small-button">${icon('Search', 15)}<span>رفتن به بخش</span><kbd dir="ltr">Ctrl K</kbd></button>
             <button type="button" id="workspace-settings-open" class="icon-button" aria-label="تنظیمات" title="تنظیمات">${icon('Settings', 16)}</button>
@@ -613,7 +633,7 @@ function render() {
         <section class="view" id="voice-view"><div class="voice-hero"><span class="eyebrow">VOICE STUDIO</span><h1>ساخت صدا</h1><p>زبان را جست‌وجو کن، مدل گفتار را نصب کن و صدای خودت را بساز.</p><div class="voice-bars"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div></div><div class="voice-layout"><div class="voice-card"><h2>ساخت گفتار</h2><label for="voice-text">متنی که خوانده شود</label><textarea maxlength="500" id="voice-text" placeholder="متن فارسی یا زبان انتخابی را اینجا بنویس..."></textarea><label for="voice-model-select">مدل نصب‌شده و زبان</label><select id="voice-model-select"></select><button id="refresh-installed-voices" class="small-button">بازخوانی مدل‌های نصب‌شده</button><div id="installed-voices" class="installed-voices"></div><button id="voice-generate" class="primary-button">ساخت صدا</button><button id="voice-stop" class="small-button" hidden>توقف ساخت یا دانلود صدا</button><p id="voice-status">صدا در پوشهٔ خروجی ذخیره می‌شود.</p><div id="voice-download-progress" class="voice-download-progress" hidden><div id="voice-download-track"></div><span id="voice-download-stats"></span></div><div id="voice-player" class="voice-player">صدای ساخته‌شده اینجا پخش می‌شود.</div></div><div class="voice-card"><h2>جست‌وجوی مدل صدا</h2><p id="voice-folder"></p><button class="small-button" id="voice-change-folder">تغییر پوشهٔ دانلود مدل‌ها</button><p>نام زبان را فارسی، انگلیسی یا با کد سه‌حرفی بنویس.</p><div class="search-row"><input id="voice-search-input" value="فارسی" placeholder="زبان"/><button id="voice-search-button">جست‌وجو</button></div><button id="persian-voice-search" class="small-button">مدل‌های فارسی</button><button id="popular-voice-search" class="small-button">مدل‌های محبوب</button><div id="voice-search-results"></div></div></div></section><section class="view" id="audio-gallery-view"><div class="section-head"><span class="eyebrow">SOUND LIBRARY</span><h1>گالری صدا</h1><p>صداهای ساخته‌شده و متن هر کدام اینجاست.</p></div><div id="voice-gallery" class="voice-gallery"></div></section><section class="view" id="models-view"><div class="section-head"><span class="eyebrow">MODEL LIBRARY</span><h1>مدل‌ها و جست‌وجو<span>.</span></h1><p>مدل‌های ذخیره‌شده را انتخاب کن یا مدل جدیدی در Hugging Face پیدا کن.</p></div><div class="kind-tabs"><button class="kind-tab active" data-kind="image">${icon('Images', 16)} مدل‌های تصویر</button><button class="kind-tab" data-kind="video">${icon('Film', 16)} مدل‌های ویدیو</button><button class="kind-tab" id="voice-model-tab">${icon('Mic2', 16)} مدل‌های صدا</button></div><div class="model-layout"><div class="model-card"><div class="card-heading"><div>${icon('HardDrive')}<h2>مدل‌های روی سیستم</h2></div><button class="icon-button" id="refresh-models" title="به‌روزرسانی">${icon('RefreshCw')}</button></div><div id="local-models" class="model-list"></div><div class="cache-settings"><div class="cache-head">${icon('Cpu', 17)} <b>مدل‌ها در حافظه</b></div><label class="memory-toggle"><input id="keep-models-loaded" type="checkbox" ${keepLoaded ? 'checked' : ''}/> مدل‌های قبلی در رم بمانند</label><p>با روشن‌بودن این گزینه، جابه‌جایی دوباره سریع‌تر است؛ مدل‌های غیرفعال از کارت گرافیک به رم منتقل می‌شوند و رم بیشتری می‌گیرند. کنار هر مدل دکمهٔ خروج از حافظه هست.</p><label class="startup-label" for="startup-model">مدل هنگام بازشدن برنامه</label><select id="startup-model" class="startup-select"></select><p>«هیچ‌کدام» یعنی برنامه بدون بارگذاری خودکار مدل باز شود.</p></div><div class="cache-settings"><div class="cache-head">${icon('FolderOpen', 17)} <b>پوشهٔ دانلود مدل‌ها</b></div><div id="model-folder" class="cache-path">در حال بررسی...</div><button id="choose-model-folder" class="small-button" data-work>انتخاب پوشه</button><p>مدل‌های قبلی سر جای خود می‌مانند. دانلودهای جدید به پوشهٔ انتخابی می‌روند.</p></div><div class="cache-settings"><div class="cache-head">${icon('FolderOpen', 17)} <b>پوشهٔ ذخیرهٔ عکس و ویدیو</b></div><div id="output-folder" class="cache-path">در حال بررسی...</div><button id="choose-output-folder" class="small-button" data-work>تغییر پوشه</button><p>فایل‌های قبلی در پوشهٔ قبلی می‌مانند؛ فایل‌های جدید در پوشهٔ انتخابی ذخیره می‌شوند.</p></div><div class="cache-settings"><div class="cache-head">${icon('HardDrive', 17)} <b>فضای استفاده‌شده</b></div><div class="storage-stats"><div>مدل‌های دانلودشده <strong id="models-size">...</strong></div><div>عکس‌ها <strong id="images-size">...</strong></div><div>ویدیوها <strong id="videos-size">...</strong></div></div><button id="refresh-storage" class="small-button">به‌روزرسانی حجم‌ها</button></div></div><div class="model-card search-card"><div class="card-heading"><div>${icon('Search')}<h2>جست‌وجوی Hugging Face</h2></div></div><div class="featured-model"><div class="featured-badge">مدل پیشنهادی · تصویر انیمه</div><strong>Animagine XL 3.1</strong><span>cagliostrolab/animagine-xl-3.1</span><p>نسخهٔ SDXL برای تصویرهای انیمه. فقط فایل‌های لازم برای اجرا دانلود می‌شوند؛ حدود ۷ گیگابایت فضا لازم است.</p><button id="featured-animagine" class="small-button" data-work>دانلود مدل</button></div><div class="featured-model featured-lora"><div class="featured-badge">LoRA · نیازمند مدل پایه</div><strong>Qwen Image 2.1 Omni LoRA</strong><span>chatrlabs/Qwen-Image-2.1-Uncensored-Omni-LoRA-v0.1</span><p>فایل LoRA حدود ۶۷۱ مگابایت است. برای ساخت تصویر باید مدل پایهٔ Qwen/Qwen-Image-2.1 جداگانه نصب شود.</p><button id="featured-qwen-lora" class="small-button" data-work>دانلود LoRA</button></div><div class="featured-model featured-gguf"><div class="featured-badge">GGUF · نیازمند موتور دیگر</div><strong>Qwen Image 2.1 Turbo Uncensored GGUF</strong><span>AtomicChat/Qwen-Image-2.1-Turbo-Uncensored-GGUF</span><p>این مخزن رمزگذار متن GGUF است. با «نصب با موتور»، فایل تصویرساز، VAE و موتور stable-diffusion.cpp نیز خودکار دریافت می‌شوند؛ مجموع دانلود حدود ۱۰ گیگابایت است و فقط با کلیک شما شروع می‌شود.</p><button id="featured-gguf" class="small-button" data-work>نصب با موتور</button></div><div class="hf-auth"><b>دسترسی Hugging Face برای مدل‌های محدود</b><p>اگر صفحهٔ مدل از تو پذیرش شرایط می‌خواهد، ابتدا در سایت Hugging Face تأییدش کن، سپس توکن خواندن خودت را اینجا وارد کن.</p><input id="hf-token" type="password" placeholder="HF read token" autocomplete="off"/><button id="hf-login" class="small-button">ورود با توکن</button><span id="hf-auth-status"></span></div><div class="featured-model"><div class="featured-badge">FLUX · مدل تصویرساز</div><strong>FLUX.1 Schnell و Dev</strong><p>مدل کامل با Diffusers اجرا می‌شود. نسخه‌های GGUF از city96 و leejet با موتور stable-diffusion.cpp و فایل‌های CLIP-L، T5-XXL و VAE نصب می‌شوند؛ ابتدا بررسی حجم را بزن.</p><button id="flux-search" class="small-button">پیداکردن FLUX</button><button id="flux-gguf-search" class="small-button">FLUX GGUF · موتور CPU و CUDA</button><button id="flux-free" class="small-button">FLUX.1 Schnell بدون مجوز ویژه · حدود ۵۴ GB</button></div><div class="search-presets"><button id="favorites-filter" class="small-button">☆ فقط علاقه‌مندی‌ها</button><button id="uncensored-search" class="small-button">مدل‌های Uncensored</button><span>تا ۵۰۰ نتیجه؛ با دکمهٔ «نمایش بیشتر»</span></div><div class="engine-presets"><button class="small-button" data-search-family="Qwen-Image" data-search-kind="image">Qwen Image</button><button class="small-button" data-search-family="FLUX" data-search-kind="image">FLUX</button><button class="small-button" data-search-family="Sana" data-search-kind="image">Sana</button><button class="small-button" data-search-family="HunyuanVideo" data-search-kind="video">Hunyuan Video</button><button class="small-button" data-search-family="LTX-2" data-search-kind="video">LTX-2</button><button class="small-button" data-search-family="Cosmos" data-search-kind="video">Cosmos</button></div><div class="search-row"><input id="search-input" placeholder="نام مدل را بنویس یا خالی بگذار"/><button id="search-button" data-work>${icon('Search', 17)} جست‌وجو</button></div><div class="engine-update"><button id="update-engine" class="small-button" data-work>به‌روزرسانی موتور Diffusers</button><span id="engine-status">برای پشتیبانی از کلاس‌های تازه، موتور را به‌روز کن.</span></div><button id="resume-download" class="small-button" type="button">ادامهٔ دانلود ناتمام</button><p class="search-note" id="search-note">مدل‌های تک‌فایلِ پشتیبانی‌شده با موتور و فایل‌های لازم نصب می‌شوند. بسته‌ها ممکن است ۱۰ تا ۲۰ گیگابایت باشند.</p><div id="download-progress" class="download-progress hidden" role="status"><div class="download-head"><strong id="download-name"></strong><b id="download-percent">۰٪</b></div><div id="download-phase" class="download-phase">در حال آماده‌سازی...</div><div class="download-track"><div id="download-fill"></div></div><div class="download-stats"><span id="download-processed">فایل‌ها: ۰ B</span><span id="download-received">دریافت از اینترنت: ۰ B</span><span id="download-speed">سرعت میانگین: ۰ B/ثانیه</span></div><button id="cancel-download" class="cancel-download" type="button">لغو دانلود</button></div><div id="search-results" class="search-results"><div class="search-placeholder">برای دیدن مدل‌ها، جست‌وجو کن.</div></div></div></div></section>
         <section class="view" id="website-view"><div class="section-head"><span class="eyebrow">REMOTE STUDIO</span><h1>وب‌سایت تصویرسازی</h1><p>سرور را روشن کن تا دوستانت با نام کاربری و رمز وارد شوند، مدل انتخاب کنند و عکس بسازند.</p></div><div class="website-grid"><div class="model-card"><div class="card-heading"><div>${icon('ExternalLink')}<h2>کنترل سرور</h2></div></div><p id="web-state">خاموش</p><label>پورت <input id="web-port" type="number" min="1024" max="65535" value="8765"/></label><div class="website-actions"><button id="web-start" class="primary-button">روشن‌کردن وب‌سایت</button><button id="web-stop" class="small-button">خاموش‌کردن</button></div><div class="website-actions"><button id="web-public-start" class="small-button">بازکردن دسترسی عمومی امن</button><button id="web-public-stop" class="small-button">بستن دسترسی عمومی</button></div><p>با کلیک، ابزار Cloudflare Tunnel در صورت نیاز دانلود می‌شود و یک نشانی HTTPS موقت می‌دهد. نام کاربری و رمز همچنان لازم است.</p><div class="web-address"><b>آدرس عمومی HTTPS</b><code id="web-tunnel">—</code><b>آدرس خصوصی</b><code id="web-private">—</code><b>آی‌پی اینترنت · صرفاً اطلاعات شبکه</b><code id="web-public">—</code><b>پوشهٔ جداگانهٔ گالری وب</b><code id="web-gallery-path">—</code></div><p>برای دسترسی از راه دور، لینک HTTPS را بفرست. تونل اتصال خروجی می‌سازد و معمولاً نیازی به دسترسی مدیر یا بازکردن پورت روتر ندارد. آی‌پی خام پشت NAT یا اینترنت اشتراکی ممکن است از بیرون باز نشود. آی‌پی عمومی خام فقط وقتی کار می‌کند که پورت روی روتر تنظیم شده باشد؛ بدون HTTPS از آن برای ورود کاربران استفاده نکن.</p><label>حداقل رم آزاد سیستم (GB) <input id="web-free-ram" type="number" min="0" max="512" step="0.5" value="2"/></label><button id="web-save-settings" class="small-button">ذخیرهٔ حد رم آزاد</button><p>درخواست وب وقتی رم آزاد کمتر از این مقدار باشد رد می‌شود. این تنظیم سقف مصرف رم نیست؛ موتور ساخت عکس با خود برنامه مشترک است.</p></div><div class="model-card"><div class="card-heading"><div>${icon('Blocks')}<h2>کاربران و سهمیه‌ها</h2></div></div><label>نام کاربر <input id="web-user-name" maxlength="40" placeholder="مثلاً ali"/></label><label>رمز عبور (حداقل ۸ نویسه) <input id="web-user-password" type="password" autocomplete="new-password"/></label><label>تعداد عکس در روز <input id="web-user-quota" type="number" min="1" max="10000" value="10"/></label><button id="web-add-user" class="primary-button">ساخت کاربر</button><p id="web-new-token"></p><div id="web-users"></div><p>کاربران با نام و رمز وارد می‌شوند. رمز در برنامه به صورت هش ذخیره می‌شود؛ اگر فراموش شد، رمز تازه تعیین کن.</p></div></div></section><section class="view" id="gallery-view"><div class="section-head"><span class="eyebrow">YOUR COLLECTION</span><h1>گالری تصاویر</h1><p>تمام تصویرهایی که با برنامه ساخته‌ای، همین‌جا نگهداری می‌شوند.</p><div class="gallery-search"><input id="gallery-query" placeholder="جست‌وجوی پرامپت، مدل یا برچسب"/><input id="gallery-from" type="date" title="از تاریخ"/><input id="gallery-to" type="date" title="تا تاریخ"/><button id="gallery-set-pin" class="small-button">قفل گالری</button></div><select id="gallery-model-filter" class="gallery-filter" aria-label="دسته‌بندی بر اساس مدل"><option value="">همهٔ مدل‌ها</option></select><label class="gallery-details-toggle"><input id="gallery-details-toggle" type="checkbox" ${showGalleryDetails ? 'checked' : ''}/> نمایش پرامپت و مدل زیر عکس‌ها</label><label class="gallery-details-toggle"><input id="gallery-favorites-filter" type="checkbox"/> فقط عکس‌های محبوب</label></div><div id="full-gallery" class="full-gallery"></div></section>
       </main>
-    </div><aside id="image-ready-notice" class="image-ready-notice" hidden><span class="image-notice-icon">${icon('Check', 18)}</span><p role="status"></p><button class="small-button" data-notice-open>مشاهدهٔ نتیجه</button><button class="icon-button" id="dismiss-image-notice" title="بستن اعلان" aria-label="بستن اعلان">${icon('X', 15)}</button></aside><div id="setup-overlay" class="setup-overlay hidden"><div class="setup-card"><div class="brand-mark"><img src="${brandIcon}" alt=""/></div><span class="eyebrow">FIRST RUN SETUP</span><h1>آماده‌سازی اولیه</h1><p>برنامه پیش‌نیازها را بررسی می‌کند و فقط مواردِ نصب‌نشده را دریافت می‌کند. نصب مدل‌های هوش مصنوعی جداگانه و به انتخاب شماست.</p><div class="setup-items"><div>✓ WebView2 آماده است</div><div id="setup-python">در حال بررسی Python...</div><div id="setup-packages">در حال بررسی بسته‌ها...</div></div><div id="setup-message" class="setup-message">در حال بررسی...</div><button id="setup-retry" class="primary-button" hidden>تلاش دوباره</button></div></div><div id="gallery-lock" class="gallery-lock hidden"><div><h2>گالری قفل است</h2><input id="gallery-pin-input" type="password" inputmode="numeric" placeholder="رمز گالری"/><button id="gallery-unlock" class="primary-button">${icon('LockKeyhole', 16)} باز کردن گالری</button><button id="gallery-lock-close" class="small-button">بستن</button><p id="gallery-lock-error"></p></div></div><div id="viewer-modal" class="modal hidden"><div class="viewer-toolbar"><button id="close-modal" class="modal-close">${icon('X')}</button><span id="modal-caption"></span><button id="viewer-reuse-prompt" class="small-button" hidden>${icon('WandSparkles', 15)} <span>استفاده از پرامپت</span></button><button id="viewer-zoom-out" class="icon-button" title="کوچک‌نمایی">−</button><button id="viewer-zoom-in" class="icon-button" title="بزرگ‌نمایی">+</button><button id="viewer-save" class="icon-button" title="دانلود عکس">${icon('Download')}</button></div><div class="viewer-image-wrap"><img id="modal-image" alt="تصویر ساخته‌شده"/></div></div>`;
+    </div>${projectDialog}${matrixDialog}<aside id="image-ready-notice" class="image-ready-notice" hidden><span class="image-notice-icon">${icon('Check', 18)}</span><p role="status"></p><button class="small-button" data-notice-open>مشاهدهٔ نتیجه</button><button class="icon-button" id="dismiss-image-notice" title="بستن اعلان" aria-label="بستن اعلان">${icon('X', 15)}</button></aside><div id="setup-overlay" class="setup-overlay hidden"><div class="setup-card"><div class="brand-mark"><img src="${brandIcon}" alt=""/></div><span class="eyebrow">FIRST RUN SETUP</span><h1>آماده‌سازی اولیه</h1><p>برنامه پیش‌نیازها را بررسی می‌کند و فقط مواردِ نصب‌نشده را دریافت می‌کند. نصب مدل‌های هوش مصنوعی جداگانه و به انتخاب شماست.</p><div class="setup-items"><div>✓ WebView2 آماده است</div><div id="setup-python">در حال بررسی Python...</div><div id="setup-packages">در حال بررسی بسته‌ها...</div></div><div id="setup-message" class="setup-message">در حال بررسی...</div><button id="setup-retry" class="primary-button" hidden>تلاش دوباره</button></div></div><div id="gallery-lock" class="gallery-lock hidden"><div><h2>گالری قفل است</h2><input id="gallery-pin-input" type="password" inputmode="numeric" placeholder="رمز گالری"/><button id="gallery-unlock" class="primary-button">${icon('LockKeyhole', 16)} باز کردن گالری</button><button id="gallery-lock-close" class="small-button">بستن</button><p id="gallery-lock-error"></p></div></div><div id="viewer-modal" class="modal hidden"><div class="viewer-toolbar"><button id="close-modal" class="modal-close">${icon('X')}</button><span id="modal-caption"></span><button id="viewer-reuse-prompt" class="small-button" hidden>${icon('WandSparkles', 15)} <span>ساخت نسخهٔ تازه</span></button><button type="button" id="viewer-versions" class="small-button" hidden>نسخه‌های مرتبط</button><button id="viewer-zoom-out" class="icon-button" title="کوچک‌نمایی">−</button><button id="viewer-zoom-in" class="icon-button" title="بزرگ‌نمایی">+</button><button id="viewer-save" class="icon-button" title="دانلود عکس">${icon('Download')}</button></div><div class="viewer-image-wrap"><img id="modal-image" alt="تصویر ساخته‌شده"/></div></div>`;
   applyTheme(localStorage.getItem('nocturne-theme'));
   organizeModelsView();
   organizeStudioView();
@@ -621,9 +641,11 @@ function render() {
   organizeBatchStudio();
   refreshIcons();
   attachEvents();
+  mountProjectControls();
 
   renderPromptPresets();
   mountWorkspacePreferences({ setCompact: setCompactNavigation, go: openWorkspace, translate: text => language === 'en' ? english[text] || text : text });
+  restoreStudioDraft();
   mountChat({ call, busy: () => busy, setBusy, view: setView, symbol: icon('Sparkles', 20) });
   mountLibrary({ busy: () => busy, view: setView, searchImage: searchModels, searchVoice: searchVoices, symbol: kind => icon(kind === 'image' ? 'Images' : kind === 'video' ? 'Film' : kind === 'voice' ? 'Mic2' : 'Sparkles', 19) });
   refreshIcons();
@@ -748,16 +770,27 @@ async function inspectModel(id: string) {
   try {
     const info = await call<Inspection>('info', { model_id: id });
     inspections.set(id, info);
-    const size = info.size_gb === null ? 'نامشخص' : `${(info.size_gb ?? 0).toLocaleString('fa-IR')} GB`;
-    const params = info.parameters === null ? 'در مخزن اعلام نشده' : Number(info.parameters).toLocaleString('fa-IR');
-    details.textContent = `حجم: ${size} · فایل: ${info.files.toLocaleString('fa-IR')} · پارامتر: ${params} · ورودی عکس: ${info.image_input === true ? 'احتمالاً پشتیبانی می‌شود' : info.image_input === false ? 'تأیید نشد؛ تلاش دستی مجاز است' : 'نامشخص'} · ${info.reason}`;
-    row.querySelector<HTMLElement>('.size-label')!.textContent = `حجم: ${size}`;
+    const scroll = document.querySelector('#search-results')!.scrollTop;
     renderSearch();
-    button.textContent = 'بررسی دوباره';
+    document.querySelector('#search-results')!.scrollTop = scroll;
   } catch (error) {
     details.textContent = `بررسی ناموفق: ${String(error)}`;
     button.textContent = 'تلاش دوباره';
   } finally { button.disabled = false; }
+}
+
+function modelPreflight(info?: Inspection) {
+  if (!info) return '';
+  const number = new Intl.NumberFormat(language === 'en' ? 'en-US' : 'fa-IR');
+  const fields = [
+    ['حجم دانلود', info.download_bytes == null ? 'نامشخص' : bytes(info.download_bytes)],
+    ['دانلود باقی‌مانده', info.remaining_bytes == null ? 'نامشخص' : bytes(info.remaining_bytes)],
+    ['پیش‌نیازها', info.requirements?.join(' · ') || 'نامشخص'],
+    ['ورودی عکس', info.image_input === true ? 'احتمالاً پشتیبانی می‌شود' : info.image_input === false ? 'تأیید نشد' : 'نامشخص'],
+    ['برآورد حافظهٔ کاری', info.memory_gib ? info.memory_gib.map(value => number.format(value)).join('–') + ' GiB' : 'نامشخص'],
+    ['پارامترها', info.parameters == null ? 'نامشخص' : number.format(info.parameters)],
+  ];
+  return `<dl class="model-preflight">${fields.map(([label, value]) => `<div><dt>${label}</dt><dd>${safe(value)}</dd></div>`).join('')}</dl><span>${safe(info.reason)}</span>`;
 }
 
 function renderSearch() {
@@ -773,7 +806,7 @@ function renderSearch() {
     const kind = inspection ? inspection.download_kind : (m.category === 'image' || m.category === 'video' || m.category === 'sdcpp' || m.category === 'checkpoint' || (m.category === 'adapter' && m.id === featuredQwenLora) ? m.category : null);
     const downloadable = !(inspection?.gated ?? m.gated) && !!kind;
     const installed = models.includes(m.id) || videoModels.includes(m.id) || sdcppModels.includes(m.id) || checkpointModels.includes(m.id) || adapters.includes(m.id);
-    return `<div class="search-result" data-model-id="${safe(m.id)}"><button class="favorite-button ${favoriteModels.has(m.id) ? 'is-favorite' : ''}" data-favorite="${safe(m.id)}" title="علاقه‌مندی">${icon('Star', 17)}</button><div class="model-symbol">${icon(m.category === 'video' ? 'Film' : 'Aperture', 19)}</div><div class="search-meta"><strong>${safe(m.id)}</strong><small>${safe(labels[m.category])} · ${m.downloads.toLocaleString('fa-IR')} دانلود</small></div><span class="size-label">${inspections.get(m.id)?.size_gb == null ? 'حجم: بررسی نشده' : `حجم: ${inspections.get(m.id)!.size_gb!.toLocaleString('fa-IR')} GB`}</span><button class="small-button inspect-button" data-inspect="${safe(m.id)}">بررسی</button><button class="small-button download-button" data-download="${safe(m.id)}" data-kind="${kind || m.category}" data-static-disabled="${downloadable && !installed ? '0' : '1'}" data-work ${downloadable && !installed ? '' : 'disabled'}>${installed ? 'نصب شده' : (m.gated && inspection?.gated !== false) ? 'دسترسی محدود' : kind === 'sdcpp' ? 'نصب با موتور' : downloadable ? 'دانلود' : inspection ? 'پشتیبانی نمی‌شود' : 'نیازمند بررسی'}</button>${inspection?.checkpoint_available && kind !== 'checkpoint' ? `<button class="small-button" data-checkpoint-download="${safe(m.id)}" data-work ${checkpointModels.includes(m.id) ? 'disabled' : ''}>${checkpointModels.includes(m.id) ? 'تک‌فایل نصب شده' : 'دریافت نسخهٔ تک‌فایل'}</button>` : ''}<div class="inspection-details">${safe(inspections.get(m.id)?.reason || '')}</div></div>`;
+    return `<div class="search-result" data-model-id="${safe(m.id)}"><button class="favorite-button ${favoriteModels.has(m.id) ? 'is-favorite' : ''}" data-favorite="${safe(m.id)}" title="علاقه‌مندی">${icon('Star', 17)}</button><div class="model-symbol">${icon(m.category === 'video' ? 'Film' : 'Aperture', 19)}</div><div class="search-meta"><strong>${safe(m.id)}</strong><small>${safe(labels[m.category])} · ${m.downloads.toLocaleString('fa-IR')} دانلود</small></div><span class="size-label">${inspections.get(m.id)?.size_gb == null ? 'حجم: بررسی نشده' : `حجم: ${inspections.get(m.id)!.size_gb!.toLocaleString('fa-IR')} GB`}</span><button class="small-button inspect-button" data-inspect="${safe(m.id)}">${inspection ? 'بررسی دوباره' : 'بررسی'}</button><button class="small-button download-button" data-download="${safe(m.id)}" data-kind="${kind || m.category}" data-static-disabled="${downloadable && !installed ? '0' : '1'}" data-work ${downloadable && !installed ? '' : 'disabled'}>${installed ? 'نصب شده' : (m.gated && inspection?.gated !== false) ? 'دسترسی محدود' : kind === 'sdcpp' ? 'نصب با موتور' : downloadable ? 'دانلود' : inspection ? 'پشتیبانی نمی‌شود' : 'نیازمند بررسی'}</button>${inspection?.checkpoint_available && kind !== 'checkpoint' ? `<button class="small-button" data-checkpoint-download="${safe(m.id)}" data-work ${checkpointModels.includes(m.id) ? 'disabled' : ''}>${checkpointModels.includes(m.id) ? 'تک‌فایل نصب شده' : 'دریافت نسخهٔ تک‌فایل'}</button>` : ''}<div class="inspection-details">${modelPreflight(inspection)}</div></div>`;
   }).join('') + (results.length > searchVisibleCount ? `<button id="more-models" class="small-button more-models">نمایش بیشتر · ${Math.min(results.length - searchVisibleCount, 80).toLocaleString('fa-IR')} مدل دیگر از ${results.length.toLocaleString('fa-IR')}</button>` : `<p class="search-total">${results.length.toLocaleString('fa-IR')} مدل نمایش داده شد</p>`) : '<div class="search-placeholder">مدلی در این دسته پیدا نشد.</div>');
   target.querySelector<HTMLButtonElement>('#more-models')?.addEventListener('click', () => { searchVisibleCount += 80; renderSearch(); });
   target.querySelectorAll<HTMLButtonElement>('[data-result-category]').forEach(button => button.onclick = () => { searchCategoryFilter = button.dataset.resultCategory as typeof searchCategoryFilter; searchVisibleCount = 80; renderSearch(); });
@@ -798,6 +831,7 @@ function loadPrompt(prompt: string, aspect?: string) {
   input.value = prompt;
   const ratio = document.querySelector<HTMLSelectElement>('#image-aspect')!;
   if (aspect && Array.from(ratio.options).some(option => option.value === aspect)) ratio.value = aspect;
+  storeStudioDraft();
   input.focus();
 }
 
@@ -811,12 +845,16 @@ function favoriteImageButton(name: string) {
 function renderGallery() {
   const recent = document.querySelector('#recent-grid');
   const full = document.querySelector('#full-gallery');
+  const related = versionFilter ? relatedImages(gallery, versionFilter) : null;
+  const projectGallery = gallery.filter(item => !projectId || item.project_id === projectId);
+  const notice = document.querySelector<HTMLElement>('#gallery-versions-notice');
+  if (notice) notice.hidden = !related;
   const tile = (item: GalleryItem) => `<button class="image-tile" data-image="${safe(item.name)}"><img src="${item.thumbnail}" alt="تصویر ${safe(item.name)}" loading="lazy"/><span>${icon('ArrowUpLeft', 18)}</span></button>`;
   const card = (item: GalleryItem) => `<div class="gallery-card">${tile(item)}${favoriteImageButton(item.name)}<input class="gallery-tag" data-tag="${safe(item.name)}" value="${safe(localStorage.getItem('nocturne-tags-' + item.name) || '')}" placeholder="برچسب‌ها؛ با ویرگول جدا کن"/>${showGalleryDetails ? `<div class="gallery-details">${item.model || item.prompt ? `<div><b>مدل</b><span dir="ltr">${safe(item.model || 'نامشخص')}</span></div><div><b>پرامپت</b><p>${safe(item.original_prompt || item.prompt || 'ثبت نشده')}</p></div>${item.prompt && item.original_prompt && item.prompt !== item.original_prompt ? `<div><b>متن اجراشده</b><p dir="ltr">${safe(item.prompt)}</p></div>` : ''}` : '<p>اطلاعات این عکس قبلاً ثبت نشده است.</p>'}</div>` : ''}</div>`;
-  if (recent) recent.innerHTML = galleryLocked ? '<div class="gallery-empty">گالری قفل است.</div>' : gallery.length ? gallery.slice(0, 6).map(tile).join('') : '<div class="gallery-empty">هنوز عکسی ذخیره نشده است.</div>';
+  if (recent) recent.innerHTML = galleryLocked ? '<div class="gallery-empty">گالری قفل است.</div>' : projectGallery.length ? projectGallery.slice(0, 6).map(tile).join('') : '<div class="gallery-empty">هنوز عکسی ذخیره نشده است.</div>';
   const filter = document.querySelector<HTMLSelectElement>('#gallery-model-filter');
-  if (filter) { const selected = galleryModelFilter; filter.innerHTML = `<option value="">همهٔ مدل‌ها</option>${[...new Set(gallery.map(item => item.model).filter(Boolean))].sort().map(model => `<option value="${safe(model)}">${safe(model)}</option>`).join('')}`; filter.value = selected; }
-  const visible = gallery.filter(item => (!showFavoriteImages || favoriteImages.has(item.name)) && (!galleryModelFilter || item.model === galleryModelFilter) && (!galleryQuery || `${item.prompt} ${item.original_prompt} ${item.model} ${localStorage.getItem('nocturne-tags-' + item.name) || ''}`.toLowerCase().includes(galleryQuery.toLowerCase())) && (!galleryFrom || item.date.slice(0, 10) >= galleryFrom) && (!galleryTo || item.date.slice(0, 10) <= galleryTo));
+  if (filter) { const selected = galleryModelFilter; filter.innerHTML = `<option value="">همهٔ مدل‌ها</option>${[...new Set(projectGallery.map(item => item.model).filter(Boolean))].sort().map(model => `<option value="${safe(model)}">${safe(model)}</option>`).join('')}`; filter.value = selected; }
+  const visible = (related ? gallery : projectGallery).filter(item => (!related || related.has(item.name)) && (!showFavoriteImages || favoriteImages.has(item.name)) && (!galleryModelFilter || item.model === galleryModelFilter) && (!galleryQuery || `${item.prompt} ${item.original_prompt} ${item.model} ${localStorage.getItem('nocturne-tags-' + item.name) || ''}`.toLowerCase().includes(galleryQuery.toLowerCase())) && (!galleryFrom || item.date.slice(0, 10) >= galleryFrom) && (!galleryTo || item.date.slice(0, 10) <= galleryTo));
   if (full) { full.classList.toggle('details-on', showGalleryDetails); full.innerHTML = galleryLocked ? '<div class="gallery-empty">گالری قفل است.</div>' : visible.length ? visible.map(card).join('') : `<div class="gallery-empty">${showFavoriteImages ? 'عکس محبوبی در این نتایج نیست.' : 'عکسی در این دسته پیدا نشد.'}</div>`; }
   document.querySelectorAll<HTMLButtonElement>('[data-image]').forEach(el => el.onclick = () => openImage(el.dataset.image!, Boolean(el.closest('#recent-grid'))));
   full?.querySelectorAll<HTMLButtonElement>('[data-favorite-image]').forEach(button => {
@@ -862,7 +900,7 @@ async function compareModels() {
       const [kind, ...parts] = picks[index].split(':'); const id = parts.join(':');
       status.textContent = `مدل ${index + 1} از ۲: ${id}`;
       await call('load', { model_id: id, kind, keep_loaded: keepLoaded });
-      const result = await call<{ name: string; image: string }>('generate', { prompt, aspect_ratio: document.querySelector<HTMLSelectElement>('#image-aspect')!.value, temporary: true });
+      const result = await call<{ name: string; image: string }>('generate', { prompt, ...generationMetadata(), temporary: true });
       const card = document.createElement('div'); card.className = 'compare-result';
       card.innerHTML = `<b>${safe(id)}</b><img src="${result.image}" alt="خروجی ${index + 1}"/><button class="small-button">ذخیره در گالری</button>`;
       card.querySelector('img')!.onclick = () => showImage(result.image, result.name);
@@ -933,11 +971,21 @@ function renderQueue() {
     </article>`;
   }).join('');
   if (!queueJobs.length) target.innerHTML = '<p class="queue-empty">Add a job to choose its prompt, model and image count.</p>';
-  const locked = queueRunning || batchRunning;
+  const pending = Boolean(pendingQueue());
+  const locked = queueRunning || batchRunning || pending;
+  const matrix = document.querySelector<HTMLButtonElement>('#matrix-open')!;
+  matrix.dataset.staticDisabled = pending ? '1' : '0';
+  matrix.disabled = busy || locked;
+  document.querySelector<HTMLElement>('#pending-queue')!.hidden = !pending || queueRunning;
+  const start = document.querySelector<HTMLButtonElement>('#queue-start')!;
+  start.dataset.staticDisabled = pending ? '1' : '0';
+  start.disabled = pending || busy || locked;
   target.querySelectorAll<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement | HTMLButtonElement>('input, select, textarea, button').forEach(control => {
     control.disabled = locked || control.disabled;
   });
-  document.querySelector<HTMLButtonElement>('#queue-add')!.disabled = locked;
+  const add = document.querySelector<HTMLButtonElement>('#queue-add')!;
+  add.disabled = locked;
+  add.dataset.staticDisabled = pending ? '1' : '0';
   target.querySelectorAll<HTMLSelectElement>('[data-queue-model]').forEach(control => control.onchange = () => {
     queueJobs[Number(control.dataset.queueModel)].model_id = control.value;
     saveQueueDraft();
@@ -987,17 +1035,31 @@ function updateQueueTotal() {
   document.querySelector<HTMLElement>('#queue-jobs-count')!.textContent = `${queueJobs.length} jobs`;
 }
 
-async function startQueue() {
+async function startQueue(resume = false) {
   if (busy) return;
-  if (!queueJobs.length) return toast('Add at least one job.', true);
-  for (const [index, job] of queueJobs.entries()) {
-    if (!job.prompt.trim()) return toast(`Job ${index + 1}: enter a prompt.`, true);
-    if (![...models, ...sdcppModels, ...checkpointModels].includes(job.model_id)) return toast(`Job ${index + 1}: select an installed image model.`, true);
-    if (!Number.isSafeInteger(job.count) || job.count < 1) return toast(`Job ${index + 1}: enter a positive whole number.`, true);
+  let run = pendingQueue();
+  if (!resume) {
+    if (run) return;
+    if (!queueJobs.length) return toast('Add at least one job.', true);
+    for (const [index, job] of queueJobs.entries()) {
+      if (!job.prompt.trim()) return toast(`Job ${index + 1}: enter a prompt.`, true);
+      if (![...models, ...sdcppModels, ...checkpointModels].includes(job.model_id)) return toast(`Job ${index + 1}: select an installed image model.`, true);
+      if (!Number.isSafeInteger(job.count) || job.count < 1) return toast(`Job ${index + 1}: enter a positive whole number.`, true);
+    }
+    const jobs = queueJobs.map(job => ({ ...job, prompt: job.prompt.trim() }));
+    if (!Number.isSafeInteger(jobs.reduce((sum, job) => sum + job.count, 0))) return toast('Queue total exceeds the supported range.', true);
+    saveQueueDraft();
+    if (!outputFolder) return toast('پوشهٔ خروجی هنوز آماده نیست.', true);
+    run = { id: newId(), folder: outputFolder, jobs };
+    try { persistQueue(run); }
+    catch { return toast('صف ذخیره نشد.', true); }
   }
-  const jobs = queueJobs.map(job => ({ ...job, prompt: job.prompt.trim() }));
-  if (!Number.isSafeInteger(jobs.reduce((sum, job) => sum + job.count, 0))) return toast('Queue total exceeds the supported range.', true);
-  saveQueueDraft();
+  if (!run) return;
+  const { jobs } = run;
+  if (resume) {
+    queueJobs = jobs.map(job => ({ ...job }));
+    saveQueueDraft();
+  }
   const total = jobs.reduce((sum, job) => sum + job.count, 0);
   queueRowDone = jobs.map(() => 0);
   queueRunning = true;
@@ -1012,8 +1074,9 @@ async function startQueue() {
   setBusy(true, 'Running image queue…');
   startSnake();
   try {
-    const result = await call<{ completed: number; active_model: string; loaded_models: LoadedModel[]; translation_warning: boolean }>('batch_queue', { jobs, keep_loaded: keepLoaded, aspect_ratio: document.querySelector<HTMLSelectElement>('#batch-aspect')!.value });
-    activeModel = result.active_model;
+    const result = await call<{ completed: number; active_model: string; loaded_models: LoadedModel[]; translation_warning: boolean }>('batch_queue', { jobs, run_id: run.id, output_folder: run.folder, project_id: projectId, keep_loaded: keepLoaded, aspect_ratio: document.querySelector<HTMLSelectElement>('#batch-aspect')!.value });
+    persistQueue(null);
+    activeModel = result.active_model || null;
     activeKind = sdcppModels.includes(result.active_model) ? 'sdcpp' : checkpointModels.includes(result.active_model) ? 'checkpoint' : 'image';
     loadedModels = result.loaded_models;
     document.querySelector('#queue-state')!.textContent = 'Queue completed';
@@ -1077,7 +1140,7 @@ async function startBatch() {
   document.querySelector('#batch-state')!.textContent = 'Generating images…';
   showBatchProgress(0, count);
   try {
-    const result = await call<{ completed: number; translation_warning: boolean }>('batch_generate', { topic, count, split_cpu: splitCpu, aspect_ratio: document.querySelector<HTMLSelectElement>('#batch-aspect')!.value });
+    const result = await call<{ completed: number; translation_warning: boolean }>('batch_generate', { topic, count, split_cpu: splitCpu, project_id: projectId, aspect_ratio: document.querySelector<HTMLSelectElement>('#batch-aspect')!.value });
     document.querySelector('#batch-state')!.textContent = 'Batch completed';
     notifyCollection(result.completed);
     if (result.translation_warning) toast('ترجمهٔ فارسی در دسترس نبود.');
@@ -1263,11 +1326,13 @@ async function generate() {
   const prompt = (document.querySelector<HTMLTextAreaElement>('#prompt')?.value || '').trim();
   if (!prompt) return toast('اول توضیح تصویر را بنویس.', true);
   if (!activeModel || (activeKind !== 'image' && activeKind !== 'sdcpp' && activeKind !== 'checkpoint')) return toast('اول یک مدل تصویر را انتخاب کن.', true);
+  const metadata = generationMetadata();
   setBusy(true, 'در حال ساخت تصویر...');
   studioPreview = 'running';
   renderStudioPreview();
   try {
-    const result = await call<{ name: string; image: string; translated: string; model: string; translation_warning: boolean; temporary: boolean }>('generate', { prompt, aspect_ratio: document.querySelector<HTMLSelectElement>('#image-aspect')!.value, temporary: temporaryImage });
+    const result = await call<{ name: string; image: string; translated: string; model: string; translation_warning: boolean; temporary: boolean }>('generate', { prompt, ...metadata, temporary: temporaryImage });
+    currentImageMetadata = { ...metadata, model: result.model };
     currentImage = result.image;
     currentImageName = result.name;
     currentImagePrompt = prompt;
@@ -1276,8 +1341,9 @@ async function generate() {
     renderStudioPreview();
     const input = document.querySelector<HTMLTextAreaElement>('#prompt')!;
     if (input.value.trim() === prompt) input.value = '';
+    storeStudioDraft();
     imageReady(result.temporary ? 'تصویر موقت آماده است.' : 'تصویر آماده است.', 'create');
-    if (!result.temporary) { gallery.unshift({ name: result.name, thumbnail: result.image, date: new Date().toISOString(), prompt: result.translated, original_prompt: prompt, model: result.model }); renderGallery(); }
+    if (!result.temporary) { gallery.unshift({ ...metadata, name: result.name, thumbnail: result.image, date: new Date().toISOString(), prompt: result.translated, original_prompt: prompt, model: result.model }); renderGallery(); }
     if (result.translation_warning) toast('ترجمه در دسترس نبود.');
   } catch (error) {
     studioPreview = 'error';
@@ -1301,18 +1367,20 @@ async function editImage() {
   if (!editSourceImage || !prompt) return toast('اول عکس و توضیح ویرایش را وارد کن.', true);
   if (!activeModel || !['image', 'checkpoint', 'sdcpp'].includes(activeKind)) return toast('اول یک مدل تصویر انتخاب کن.', true);
   const status = document.querySelector('#image-input-status')!;
+  const metadata = { ...generationMetadata(), mode: 'edit' as const, strength: Number(document.querySelector<HTMLInputElement>('#edit-strength')!.value) };
   setBusy(true, 'در حال ویرایش عکس...');
   status.textContent = 'مدل در حال ویرایش عکس است...';
   studioPreview = 'running';
   renderStudioPreview();
   try {
-    const result = await call<{ name: string; image: string; translated: string; model: string; temporary: boolean }>('edit_image', { prompt, image: editSourceImage, strength: Number(document.querySelector<HTMLInputElement>('#edit-strength')!.value), aspect_ratio: document.querySelector<HTMLSelectElement>('#image-aspect')!.value, temporary: temporaryImage });
+    const result = await call<{ name: string; image: string; translated: string; model: string; temporary: boolean }>('edit_image', { prompt, image: editSourceImage, ...metadata, temporary: temporaryImage });
+    currentImageMetadata = { ...metadata, model: result.model };
     currentImage = result.image; currentImageName = result.name; currentImageTemporary = result.temporary;
     currentImagePrompt = prompt;
     studioPreview = 'ready';
     renderStudioPreview();
     imageReady('تصویر ویرایش‌شده آماده است.', 'edit');
-    if (!result.temporary) { gallery.unshift({ name: result.name, thumbnail: result.image, date: new Date().toISOString(), prompt: result.translated, original_prompt: prompt, model: result.model }); renderGallery(); }
+    if (!result.temporary) { gallery.unshift({ ...metadata, name: result.name, thumbnail: result.image, date: new Date().toISOString(), prompt: result.translated, original_prompt: prompt, model: result.model }); renderGallery(); }
     status.textContent = result.temporary ? 'ویرایش موقت آماده است؛ برای نگه‌داشتن آن ذخیره را بزن.' : 'عکس ویرایش شد و در گالری ذخیره شد.';
   } catch (error) {
     studioPreview = 'error';
@@ -1394,7 +1462,7 @@ async function downloadModel(id: string, kind = modelKind) {
     document.querySelector('#download-phase')!.textContent = cancellingDownload ? 'دانلود متوقف شد. دوباره می‌توانی ادامه بدهی.' : 'دانلود انجام نشد. پیام خطا را ببین.';
     toast(String(error), !cancellingDownload);
   }
-  finally { window.clearInterval(idleTimer); cancel.hidden = true; cancellingDownload = false; setBusy(false); }
+  finally { inspections.delete(id); renderSearch(); window.clearInterval(idleTimer); cancel.hidden = true; cancellingDownload = false; setBusy(false); }
 }
 
 async function cancelDownload() {
@@ -1429,6 +1497,8 @@ async function openImage(name: string, recent: boolean) {
 
 function showImage(image: string, name: string) {
   const saved = gallery.find(item => item.name === name);
+  viewerSettings = saved || (name === currentImageName ? currentImageMetadata : {});
+  document.querySelector<HTMLButtonElement>('#viewer-versions')!.hidden = !saved || relatedImages(gallery, name).size < 2;
   viewerPrompt = saved?.original_prompt || saved?.prompt || (name === currentImageName ? currentImagePrompt : '');
   document.querySelector<HTMLButtonElement>('#viewer-reuse-prompt')!.hidden = !viewerPrompt;
   viewerZoom = 1;
@@ -1597,6 +1667,287 @@ async function changeDevice(device: string) {
   } finally { setBusy(false); }
 }
 
+
+function generationMetadata() {
+  return {
+    project_id: projectId,
+    parent_image: parentImage,
+    aspect_ratio: document.querySelector<HTMLSelectElement>('#image-aspect')!.value,
+  };
+}
+
+function storeStudioDraft() {
+  const draft = {
+    prompt: document.querySelector<HTMLTextAreaElement>('#prompt')!.value,
+    edit: document.querySelector<HTMLTextAreaElement>('#edit-prompt')!.value,
+    aspect: document.querySelector<HTMLSelectElement>('#image-aspect')!.value,
+    parent: parentImage,
+  };
+  try { localStorage.setItem(scopedKey(studioDraftKey), JSON.stringify(draft)); }
+  catch { /* The current prompt remains available in the editor. */ }
+}
+
+function restoreStudioDraft() {
+  const draft = stored(scopedKey(studioDraftKey), { prompt: '', edit: '', aspect: '', parent: '' });
+  document.querySelector<HTMLTextAreaElement>('#prompt')!.value = draft.prompt;
+  document.querySelector<HTMLTextAreaElement>('#edit-prompt')!.value = draft.edit;
+  const ratio = document.querySelector<HTMLSelectElement>('#image-aspect')!;
+  const fallback = localStorage.getItem('nocturne-default-aspect') || '1:1';
+  const chosen = draft.aspect || fallback;
+  ratio.value = aspectOptions.some(([value]) => value === chosen) ? chosen : '1:1';
+  parentImage = draft.parent;
+}
+
+function setEditSource(image: string) {
+  editSourceImage = image;
+  const preview = document.querySelector<HTMLImageElement>('#edit-source-preview')!;
+  if (image) preview.src = image;
+  else preview.removeAttribute('src');
+  preview.hidden = !image;
+}
+
+async function uploadReference(file: File) {
+  if (busy) return;
+  if (!['image/png', 'image/jpeg', 'image/webp'].includes(file.type) || file.size > 20 * 1024 ** 2) {
+    return toast('فقط PNG، JPEG یا WebP تا ۲۰ مگابایت پذیرفته می‌شود.', true);
+  }
+  const owner = projectId;
+  const reader = new FileReader();
+  reader.onload = async () => {
+    if (owner !== projectId || busy) return;
+    const image = String(reader.result);
+    setEditSource(image);
+    document.querySelector('#image-input-status')!.textContent = file.name;
+    if (!owner) return;
+    setBusy(true, 'در حال ذخیرهٔ عکس مرجع…');
+    try { const saved = await call<{ id: string }>('project_reference', { project_id: owner, image, name: file.name });
+      await refreshReferences(saved.id); }
+    catch (error) { toast(String(error), true); }
+    finally { setBusy(false); }
+  };
+  reader.onerror = () => toast('خواندن عکس ناموفق بود.', true);
+  reader.readAsDataURL(file);
+}
+
+function refreshProjectPicker() {
+  const picker = document.querySelector<HTMLSelectElement>('#project-select')!;
+  picker.replaceChildren(new Option(language === 'en' ? 'All projects' : 'همهٔ پروژه‌ها', ''),
+    ...projects.map(project => new Option(project.name, project.id)));
+  picker.value = projectId;
+  document.querySelector<HTMLElement>('#project-references')!.hidden = !projectId;
+}
+
+function switchProject(id: string) {
+  if (busy || id === projectId) return;
+  storeStudioDraft();
+  try { activateProject(id); }
+  catch { refreshProjectPicker(); return toast('پروژه ذخیره نشد.', true); }
+  queueJobs = readQueueDraft();
+  queueRowDone = [];
+  promptPresets = stored<PromptPreset[]>(scopedKey(promptPresetsKey), []);
+  setStudioMode('create');
+  restoreStudioDraft();
+  setEditSource('');
+  document.querySelector('#image-input-status')!.textContent = 'یک مدل و عکس انتخاب کن؛ سپس بررسی یا ویرایش را بزن.';
+  document.querySelector<HTMLInputElement>('#edit-source')!.value = '';
+  currentImage = null;
+  currentImageName = '';
+  currentImageMetadata = {};
+  studioPreview = 'empty';
+  document.querySelector('#viewer-modal')!.classList.add('hidden');
+  document.querySelector<HTMLElement>('#image-ready-notice')!.hidden = true;
+  document.querySelector('#queue-progress')!.classList.add('hidden');
+  versionFilter = '';
+  galleryModelFilter = '';
+  refreshProjectPicker();
+  void refreshReferences();
+  renderPromptPresets();
+  renderStudioPreview();
+  renderQueue();
+  renderGallery();
+}
+
+async function reuseImage() {
+  if (!viewerPrompt || privacyCover || busy) return;
+  const saved = viewerSettings;
+  const prompt = viewerPrompt;
+  const shownImage = document.querySelector<HTMLImageElement>('#modal-image')!.src;
+  const savedModel = saved.model;
+  const kind = savedModel && (
+    sdcppModels.includes(savedModel) ? 'sdcpp' : checkpointModels.includes(savedModel) ? 'checkpoint'
+      : models.includes(savedModel) ? 'image' : ''
+  );
+  document.querySelector('#viewer-modal')!.classList.add('hidden');
+  setView('studio');
+  setStudioMode(saved.mode === 'edit' ? 'edit' : 'create');
+  parentImage = saved.name || '';
+  loadPrompt(prompt, saved.aspect_ratio);
+  if (saved.mode === 'edit') {
+    setEditSource(shownImage);
+    const edit = document.querySelector<HTMLTextAreaElement>('#edit-prompt')!;
+    edit.value = prompt;
+    const strength = document.querySelector<HTMLInputElement>('#edit-strength')!;
+    if (typeof saved.strength === 'number') {
+      strength.value = String(saved.strength);
+      strength.dispatchEvent(new Event('input'));
+    }
+    edit.focus();
+  }
+  storeStudioDraft();
+  if (savedModel && kind && activeModel !== savedModel) await loadModel(savedModel, kind, false);
+  if (savedModel && activeModel !== savedModel) toast('مدل تصویر اصلی آماده نیست؛ مدل را بررسی کن.', true);
+}
+
+async function refreshReferences(selected = '') {
+  const owner = projectId;
+  const picker = document.querySelector<HTMLSelectElement>('#project-reference-select')!;
+  picker.replaceChildren(new Option('انتخاب عکس مرجع', ''));
+  if (!owner) return;
+  try {
+    const data = await call<{ references: { id: string; name: string }[] }>('project_reference', { project_id: owner });
+    if (owner !== projectId) return;
+    picker.append(...data.references.map(ref => new Option(ref.name, ref.id)));
+    picker.value = selected;
+    if (!picker.selectedOptions.length) picker.selectedIndex = 0;
+    applyLanguage();
+  } catch (error) { if (owner === projectId) toast(String(error), true); }
+}
+
+function mountProjectControls() {
+  const picker = document.querySelector<HTMLSelectElement>('#project-select')!;
+  const dialog = document.querySelector<HTMLDialogElement>('#project-dialog')!;
+  const name = document.querySelector<HTMLInputElement>('#project-name')!;
+  refreshProjectPicker();
+  picker.onchange = () => switchProject(picker.value);
+  document.querySelector<HTMLButtonElement>('#project-create')!.onclick = () => {
+    if (busy || privacyCover) return;
+    name.value = '';
+    dialog.returnValue = '';
+    dialog.showModal();
+  };
+  dialog.onclose = () => {
+    if (dialog.returnValue !== 'create' || busy) return;
+    const label = name.value.trim();
+    if (!label) return;
+    try { switchProject(addProject(label)); }
+    catch { toast('پروژه ذخیره نشد.', true); }
+  };
+  for (const id of ['prompt', 'edit-prompt', 'image-aspect']) {
+    document.getElementById(id)!.addEventListener('input', storeStudioDraft);
+  }
+
+  document.querySelector<HTMLButtonElement>('#project-load-reference')!.onclick = async () => {
+    if (!projectId || busy) return;
+    const referenceId = document.querySelector<HTMLSelectElement>('#project-reference-select')!.value;
+    if (!referenceId) return toast('یک عکس مرجع انتخاب کن.', true);
+    setBusy(true, 'در حال خواندن عکس مرجع…');
+    try {
+      const data = await call<{ image: string }>('project_reference', { project_id: projectId, reference_id: referenceId });
+      if (data.image) setEditSource(data.image);
+      else toast('عکس مرجعی برای این پروژه ذخیره نشده است.', true);
+    } catch (error) { toast(String(error), true); }
+    finally { setBusy(false); }
+  };
+
+  document.querySelector('#full-gallery')!.insertAdjacentHTML('beforebegin', `
+    <div id="gallery-versions-notice" hidden><span>نسخه‌های مرتبط</span>
+      <button type="button" class="small-button" id="gallery-clear-versions">نمایش همه</button></div>`);
+  document.querySelector<HTMLButtonElement>('#gallery-clear-versions')!.onclick = () => {
+    versionFilter = '';
+    renderGallery();
+  };
+  document.querySelector<HTMLButtonElement>('#viewer-versions')!.onclick = () => {
+    if (!viewerSettings.name || galleryLocked || privacyCover) return;
+    versionFilter = viewerSettings.name;
+    galleryModelFilter = galleryQuery = galleryFrom = galleryTo = '';
+    for (const id of ['gallery-query', 'gallery-from', 'gallery-to']) document.querySelector<HTMLInputElement>('#' + id)!.value = '';
+    showFavoriteImages = false;
+    document.querySelector<HTMLInputElement>('#gallery-favorites-filter')!.checked = false;
+    document.querySelector('#viewer-modal')!.classList.add('hidden');
+    renderGallery();
+    setView('gallery');
+  };
+
+  document.querySelector<HTMLButtonElement>('#queue-resume')!.onclick = () => void startQueue(true);
+  document.querySelector<HTMLButtonElement>('#queue-discard')!.onclick = () => {
+    if (busy || !window.confirm(language === 'en'
+      ? 'Clear the saved run? Generated images and the queue draft will stay.'
+      : 'صف ذخیره‌شده کنار گذاشته شود؟ عکس‌های ساخته‌شده و پیش‌نویس صف باقی می‌مانند.')) return;
+    try {
+      persistQueue(null);
+      queueRowDone = [];
+      document.querySelector('#queue-progress')!.classList.add('hidden');
+      renderQueue();
+    } catch { toast('صف ذخیره نشد.', true); }
+  };
+
+  mountMatrix();
+}
+
+function mountMatrix() {
+  const dialog = document.querySelector<HTMLDialogElement>('#matrix-dialog')!;
+  const form = document.querySelector<HTMLFormElement>('#matrix-form')!;
+  const prompts = document.querySelector<HTMLTextAreaElement>('#matrix-prompts')!;
+  const count = document.querySelector<HTMLInputElement>('#matrix-count')!;
+  const preview = document.querySelector<HTMLElement>('#matrix-preview')!;
+  const append = document.querySelector<HTMLButtonElement>('#matrix-append')!;
+  let combinations: QueueJob[] = [];
+  function clearPreview() {
+    combinations = [];
+    preview.replaceChildren();
+    append.disabled = true;
+  }
+  document.querySelector<HTMLButtonElement>('#matrix-open')!.onclick = () => {
+    if (busy || privacyCover) return;
+    const installed = [...new Set([...models, ...sdcppModels, ...checkpointModels])];
+    if (!installed.length) return toast('اول یک مدل تصویر را انتخاب کن.', true);
+    clearPreview();
+    document.querySelector('#matrix-models')!.innerHTML = installed.map(id =>
+      `<label dir="ltr"><input type="checkbox" name="model" value="${safe(id)}" ${id === activeModel ? 'checked' : ''}/>${safe(id)}</label>`).join('');
+    document.querySelector('#matrix-ratios')!.innerHTML = aspectOptions.map(([ratio]) =>
+      `<label dir="ltr"><input type="checkbox" name="ratio" value="${ratio}" ${ratio === '1:1' ? 'checked' : ''}/>${ratio}</label>`).join('');
+    dialog.showModal();
+  };
+  document.querySelector<HTMLButtonElement>('#matrix-close')!.onclick = () => dialog.close();
+  form.oninput = event => {
+    if (preview.contains(event.target as Node)) {
+      append.disabled = !preview.querySelector(':checked');
+    } else clearPreview();
+  };
+  form.onsubmit = event => {
+    event.preventDefault();
+    const data = new FormData(form);
+    const lines = [...new Set(prompts.value.split(/\r?\n/).map(value => value.trim()).filter(Boolean))];
+    const picks = data.getAll('model').map(String);
+    const ratios = data.getAll('ratio').map(String);
+    const images = count.valueAsNumber;
+    const total = lines.length * picks.length * ratios.length;
+    if (!total || !Number.isSafeInteger(images) || images < 1) return toast('پرامپت، مدل و نسبت تصویر را انتخاب کن.', true);
+    if (total > 2000 || !Number.isSafeInteger(total * images)) return toast('ترکیب‌ها را در چند مرحله اضافه کن.', true);
+    combinations = buildCombinations(lines, picks, ratios, images);
+    preview.innerHTML = combinations.map((job, index) => `
+      <label dir="auto"><input type="checkbox" data-combination="${index}" checked/>
+        <span>${safe(job.prompt)} · <bdi>${safe(job.model_id)} · ${job.aspect_ratio} · ×${job.count}</bdi></span>
+      </label>`).join('');
+    append.disabled = false;
+  };
+  append.onclick = () => {
+    if (busy) return;
+    const chosen = Array.from(preview.querySelectorAll<HTMLInputElement>('[data-combination]:checked'),
+      item => combinations[Number(item.dataset.combination)]);
+    if (!chosen.length) return;
+    const draft = queueJobs[0];
+    if (queueJobs.length === 1 && !draft.model_id && !draft.prompt && draft.count === 20 && !draft.variations) {
+      queueJobs = [];
+    }
+    queueJobs.push(...chosen);
+    queueRowDone = [];
+    saveQueueDraft();
+    renderQueue();
+    dialog.close();
+  };
+}
+
 function attachEvents() {
   const notification = document.querySelector<HTMLButtonElement>('#image-notifications')!;
   notification.onclick = () => {
@@ -1621,7 +1972,7 @@ function attachEvents() {
     if (promptPresets.some(preset => preset.name === name)) return toast('این نام قبلاً استفاده شده است.', true);
     const aspect = document.querySelector<HTMLSelectElement>('#image-aspect')!.value;
     promptPresets.push({ name, prompt, aspect });
-    localStorage.setItem(promptPresetsKey, JSON.stringify(promptPresets));
+    localStorage.setItem(scopedKey(promptPresetsKey), JSON.stringify(promptPresets));
     presetName.value = '';
     renderPromptPresets(name);
     toast('پرامپت و نسبت تصویر ذخیره شدند.');
@@ -1633,7 +1984,7 @@ function attachEvents() {
   presetRemove.onclick = () => {
     if (!presetSelect.value) return;
     promptPresets = promptPresets.filter(item => item.name !== presetSelect.value);
-    localStorage.setItem(promptPresetsKey, JSON.stringify(promptPresets));
+    localStorage.setItem(scopedKey(promptPresetsKey), JSON.stringify(promptPresets));
     renderPromptPresets();
     toast('پرامپت ذخیره‌شده حذف شد.');
   };
@@ -1644,7 +1995,10 @@ function attachEvents() {
   document.querySelector<HTMLButtonElement>('#check-image-input')!.onclick = () => void checkImageInput();
   document.querySelector<HTMLButtonElement>('#edit-generate')!.onclick = () => void editImage();
   document.querySelector<HTMLInputElement>('#edit-strength')!.oninput = event => { document.querySelector('#edit-strength-value')!.textContent = Number((event.target as HTMLInputElement).value).toLocaleString('fa-IR'); };
-  document.querySelector<HTMLInputElement>('#edit-source')!.onchange = event => { const file = (event.target as HTMLInputElement).files?.[0]; if (!file) return; if (!['image/png', 'image/jpeg', 'image/webp'].includes(file.type) || file.size > 20 * 1024 ** 2) return toast('فقط PNG، JPEG یا WebP تا ۲۰ مگابایت پذیرفته می‌شود.', true); const reader = new FileReader(); reader.onload = () => { editSourceImage = String(reader.result); const preview = document.querySelector<HTMLImageElement>('#edit-source-preview')!; preview.src = editSourceImage; preview.hidden = false; document.querySelector('#image-input-status')!.textContent = `${file.name} آمادهٔ ویرایش است.`; }; reader.onerror = () => toast('خواندن عکس ناموفق بود.', true); reader.readAsDataURL(file); };
+  document.querySelector<HTMLInputElement>('#edit-source')!.onchange = event => {
+    const file = (event.target as HTMLInputElement).files?.[0];
+    if (file) void uploadReference(file);
+  };
   document.querySelector<HTMLButtonElement>('#hf-login')!.onclick = async () => { const input = document.querySelector<HTMLInputElement>('#hf-token')!; try { await call('hf_login', { token: input.value }); input.value = ''; document.querySelector('#hf-auth-status')!.textContent = 'حساب متصل شد. مدل را دوباره بررسی کن.'; toast('ورود Hugging Face انجام شد.'); } catch (error) { input.value = ''; toast(String(error), true); } };
   document.querySelector<HTMLButtonElement>('#flux-search')!.onclick = () => { setView('models'); document.querySelector<HTMLInputElement>('#search-input')!.value = 'FLUX'; void searchModels(true); };
   document.querySelector<HTMLButtonElement>('#flux-free')!.onclick = () => { setView('models'); document.querySelector<HTMLInputElement>('#search-input')!.value = 'unsloth/FLUX.1-schnell'; void searchModels(true); };
@@ -1714,7 +2068,7 @@ function attachEvents() {
     saveQueueDraft();
     renderQueue();
     document.querySelector<HTMLTextAreaElement>('[data-queue-prompt="' + (queueJobs.length - 1) + '"]')!.focus(); };
-  document.querySelector<HTMLButtonElement>('#queue-start')!.onclick = startQueue;
+  document.querySelector<HTMLButtonElement>('#queue-start')!.onclick = () => void startQueue();
   document.querySelector<HTMLButtonElement>('#queue-stop')!.onclick = stopQueue;
   document.querySelector<HTMLButtonElement>('#stop-batch')!.onclick = stopBatch;
   document.querySelector<HTMLButtonElement>('#shuffle-ideas')!.onclick = () => { ideaOffset = (ideaOffset + 6) % ideas.length; renderIdeas(); };
@@ -1803,13 +2157,7 @@ function attachEvents() {
   };
   document.querySelector<HTMLSelectElement>('#gallery-model-filter')!.onchange = event => { galleryModelFilter = (event.target as HTMLSelectElement).value; renderGallery(); };
   document.querySelector<HTMLButtonElement>('#save-image')!.onclick = async () => { if (!currentImage) return; if (currentImageTemporary) { try { await call('save_temporary_image', { name: currentImageName }); currentImageTemporary = false; renderStudioPreview(); gallery = await call<GalleryItem[]>('gallery'); renderGallery(); toast('عکس در پوشهٔ خروجی ذخیره شد.'); } catch (error) { toast(String(error), true); } } else { const a = document.createElement('a'); a.href = currentImage; a.download = currentImageName; a.click(); } };
-  document.querySelector<HTMLButtonElement>('#viewer-reuse-prompt')!.onclick = () => {
-    if (!viewerPrompt || privacyCover) return;
-    document.querySelector('#viewer-modal')!.classList.add('hidden');
-    setView('studio');
-    setStudioMode('create');
-    loadPrompt(viewerPrompt);
-  };
+  document.querySelector<HTMLButtonElement>('#viewer-reuse-prompt')!.onclick = () => void reuseImage();
   document.querySelector<HTMLButtonElement>('#viewer-zoom-in')!.onclick = () => { viewerZoom = Math.min(4, viewerZoom + .25); document.querySelector<HTMLImageElement>('#modal-image')!.style.transform = `scale(${viewerZoom})`; };
   document.querySelector<HTMLButtonElement>('#viewer-zoom-out')!.onclick = () => { viewerZoom = Math.max(.5, viewerZoom - .25); document.querySelector<HTMLImageElement>('#modal-image')!.style.transform = `scale(${viewerZoom})`; };
   document.querySelector<HTMLButtonElement>('#viewer-save')!.onclick = () => { const image = document.querySelector<HTMLImageElement>('#modal-image')!; const a = document.createElement('a'); a.href = image.src; a.download = document.querySelector('#modal-caption')!.textContent || 'nocturne.png'; a.click(); };
@@ -1882,7 +2230,7 @@ async function boot() {
     if (jobStatus) jobStatus.textContent = `${p.row_completed} / ${p.row_total} images`;
     document.querySelectorAll<HTMLElement>('.queue-job').forEach((job, index) => {
       job.classList.toggle('queue-job-active', index === p.row);
-      job.classList.toggle('queue-job-complete', index < p.row || (index === p.row && p.row_completed === p.row_total));
+      job.classList.toggle('queue-job-complete', (queueRowDone[index] || 0) >= (queueJobs[index]?.count || Infinity));
     });
   });
   await listen<{ completed: number; total: number; name: string; device: string }>('batch-progress', event => {
@@ -1926,6 +2274,7 @@ async function boot() {
     renderGallery();
     renderVideos();
     await refreshStorage();
+    await refreshReferences();
     if (startupModel) {
       const separator = startupModel.indexOf(':');
       const kind = startupModel.slice(0, separator);

@@ -21,6 +21,16 @@ Version 2.0 introduces a new app icon, a graphite-and-peach theme and a home scr
 
 ![Batch jobs with separate prompts, models, counts and aspect ratios](docs/screenshots/batch-queue.png)
 
+## Projects and resumable queues
+
+- Use the project selector in the top bar to start or switch projects. Each project has its own prompt drafts, presets, saved reference images, batch queue and gallery view. Upload reference images in **Image studio → Edit** and reuse them from **Project references**.
+- In **Batch studio → Job queue**, use **Combine prompts and models** to preview all chosen prompt, model and aspect-ratio combinations. Uncheck any jobs you want to omit before adding them.
+- If a job stops or the app closes, reopen the project and select **Resume queue**. Use the same output folder. The queue skips images already saved by that run.
+- Open a photo in the gallery and select **Create a new version** to reuse its saved prompt and available settings. **Related versions** groups the original and its descendants.
+- In **Model library**, select **Inspect** to see the download plan, remaining known bytes, engine requirements and image-input support. Working memory is an estimate and varies by device and generation settings.
+
+![Previewing prompt, model and aspect-ratio combinations](docs/screenshots/combinations.png)
+
 ## Install and run
 
 1. Open the latest release and download the Windows x64 installer. For a portable copy, download the ZIP, extract the whole archive and run `nocturne-studio.exe`.

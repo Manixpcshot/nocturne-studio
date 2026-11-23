@@ -57,6 +57,7 @@ WEB_LOGIN_ATTEMPTS = {}
 ORIGINAL_HF_HOME = Path(os.environ.get("NOCTURNE_ORIGINAL_HF_HOME", str(Path.home() / ".cache/huggingface")))
 MODEL_HOME = Path(os.environ.get("HF_HOME", str(ORIGINAL_HF_HOME)))
 WEB_CONFIG = Path(os.environ.get("NOCTURNE_APP_DIR", str(MODEL_HOME))) / ".nocturne-web-users.json"
+APP_DIR = WEB_CONFIG.parent
 MODEL_CACHE = MODEL_HOME / "hub"
 SDCPP_ROOT = MODEL_HOME / "nocturne-sdcpp"
 CHECKPOINT_ROOT = MODEL_HOME / "nocturne-checkpoints"
@@ -211,6 +212,58 @@ def model_type(class_name):
     return "video" if class_name in SUPPORTED_VIDEO_CLASSES or any(x in name for x in ("video", "cogvideo", "wanpipeline", "ltxpipeline", "mochipipeline", "allegropipeline", "texttoworld", "predictbase")) else "image"
 
 
+def project_id(value):
+    if value and (not isinstance(value, str) or not re.fullmatch(r"[a-f0-9]{32}", value)):
+        raise ValueError("Invalid project identifier.")
+    return value or ""
+
+
+def image_context(payload):
+    result = {"project_id": project_id(payload.get("project_id"))}
+    parent = payload.get("parent_image")
+    if isinstance(parent, str) and parent == Path(parent).name and parent.lower().endswith(".png"):
+        result["parent_image"] = parent
+    return result
+
+
+def project_reference(id_, image=None, reference_id="", name=""):
+    id_ = project_id(id_)
+    if not id_:
+        raise ValueError("Select a project first.")
+    references = APP_DIR / "project-references" / id_
+    if image is not None:
+        header, separator, encoded = image.partition(",")
+        if not separator or header not in ("data:image/png;base64", "data:image/jpeg;base64", "data:image/webp;base64") or len(encoded) > 28 * 1024**2:
+            raise ValueError("Use a PNG, JPEG or WebP file up to 20 MB.")
+        raw = base64.b64decode(encoded, validate=True)
+        if len(raw) > 20 * 1024**2:
+            raise ValueError("The reference file exceeds 20 MB.")
+        with Image.open(io.BytesIO(raw)) as ref:
+            if ref.format not in ("PNG", "JPEG", "WEBP"):
+                raise ValueError("The reference image format is not supported.")
+            ref.load()
+        key = hashlib.sha256(raw).hexdigest()[:32]
+        references.mkdir(parents=True, exist_ok=True)
+        path = references / (key + ".image")
+        temp = path.with_suffix(".part")
+        temp.write_bytes(image.encode("ascii"))
+        temp.replace(path)
+        label = Path(str(name)).name[:160] or key
+        label_path = references / (key + ".txt")
+        label_part = label_path.with_suffix(".label-part")
+        label_part.write_text(label, encoding="utf-8")
+        label_part.replace(label_path)
+        return {"id": key, "name": label}
+    if reference_id:
+        path = references / (project_id(reference_id) + ".image")
+        return {"image": path.read_text(encoding="ascii")}
+    items = []
+    for label in references.glob("*.txt"):
+        if label.with_suffix(".image").is_file():
+            items.append({"id": label.stem, "name": label.read_text(encoding="utf-8")})
+    return {"references": sorted(items, key=lambda item: item["name"].casefold())}
+
+
 def gallery():
     if not OUTPUT_DIR.exists():
         return []
@@ -221,7 +274,8 @@ def gallery():
             metadata_file = path.with_suffix(".json")
             if metadata_file.is_file():
                 try:
-                    metadata = json.loads(metadata_file.read_text(encoding="utf-8"))
+                    value = json.loads(metadata_file.read_text(encoding="utf-8"))
+                    metadata = value if isinstance(value, dict) else {}
                 except (OSError, ValueError):
                     pass
             with Image.open(path) as image:
@@ -231,7 +285,9 @@ def gallery():
             items.append({"name": path.name, "thumbnail": "data:image/jpeg;base64," + base64.b64encode(buffer.getvalue()).decode(),
                           "date": datetime.fromtimestamp(path.stat().st_mtime).isoformat(),
                           "prompt": metadata.get("prompt", ""), "original_prompt": metadata.get("original_prompt", ""),
-                          "model": metadata.get("model", "")})
+                          "model": metadata.get("model", ""), "aspect_ratio": metadata.get("aspect_ratio"),
+                          "project_id": metadata.get("project_id", ""), "parent_image": metadata.get("parent_image", ""),
+                          "mode": metadata.get("mode"), "strength": metadata.get("strength")})
         except OSError:
             pass
     return items
@@ -525,7 +581,24 @@ def image_settings(pipeline, model_id, aspect_ratio="1:1"):
     return {key: value for key, value in settings.items() if key in supported}
 
 
-def create_image(pipeline, model_id, translated, device, include_image=True, original_prompt=None, aspect_ratio="1:1", temporary=False):
+def image_paths(temporary, filename):
+    destination = TEMP_IMAGES if temporary else OUTPUT_DIR
+    staging = destination / ".nocturne-pending"
+    staging.mkdir(parents=True, exist_ok=True)
+    return staging / filename, destination / filename
+
+
+def commit_image(staged, output, translated, original, model_id, ratio, metadata=None):
+    details = {"prompt": translated, "original_prompt": original or translated, "model": model_id,
+               "aspect_ratio": ratio, **(metadata or {})}
+    sidecar = staged.with_suffix(".json")
+    sidecar.write_text(json.dumps(details, ensure_ascii=False), encoding="utf-8")
+    sidecar.replace(output.with_suffix(".json"))
+    # A visible PNG marks the commit, including after the app stops before a progress event.
+    staged.replace(output)
+
+
+def create_image(pipeline, model_id, translated, device, include_image=True, original_prompt=None, aspect_ratio="1:1", temporary=False, metadata=None, filename=None):
     import torch
     if device.startswith("cuda"):
         torch.cuda.empty_cache()
@@ -533,27 +606,24 @@ def create_image(pipeline, model_id, translated, device, include_image=True, ori
         image = pipeline(prompt=translated, **image_settings(pipeline, model_id, aspect_ratio)).images[0]
     if all(high <= 1 for low, high in image.convert("RGB").getextrema()):
         raise RuntimeError("خروجی مدل کاملاً سیاه شد. یک پرامپت دیگر یا مدل دیگری را امتحان کنید.")
-    destination = TEMP_IMAGES if temporary else OUTPUT_DIR
-    destination.mkdir(parents=True, exist_ok=True)
-    filename = f"image_{datetime.now():%Y%m%d_%H%M%S_%f}.png"
-    image_path = destination / filename
-    image.save(image_path)
-    image_path.with_suffix(".json").write_text(json.dumps({"prompt": translated,
-        "original_prompt": original_prompt or translated, "model": model_id}, ensure_ascii=False), encoding="utf-8")
+    filename = filename or f"image_{datetime.now():%Y%m%d_%H%M%S_%f}.png"
+    staged, image_path = image_paths(temporary, filename)
+    image.save(staged)
+    commit_image(staged, image_path, translated, original_prompt, model_id, aspect_ratio, metadata)
     result = {"name": filename, "translated": translated, "model": model_id, "temporary": temporary}
     if include_image:
         result["image"] = "data:image/png;base64," + base64.b64encode(image_path.read_bytes()).decode()
     return result
 
 
-def generate(prompt, translated_override=None, warning_override=False, include_image=True, aspect_ratio="1:1", temporary=False):
+def generate(prompt, translated_override=None, warning_override=False, include_image=True, aspect_ratio="1:1", temporary=False, metadata=None):
     import torch
     if pipe is None or active_kind not in ("image", "checkpoint"):
         raise RuntimeError("اول یک مدل را انتخاب کنید.")
     translated, translation_warning = (translated_override, warning_override) if translated_override is not None else translate_prompt(prompt.strip(), torch)
     if not translated:
         raise RuntimeError("پرامپت خالی است.")
-    result = create_image(pipe, active_model, translated, selected_device, include_image, original_prompt=prompt, aspect_ratio=aspect_ratio, temporary=temporary)
+    result = create_image(pipe, active_model, translated, selected_device, include_image, original_prompt=prompt, aspect_ratio=aspect_ratio, temporary=temporary, metadata=metadata)
     result["translation_warning"] = translation_warning
     return result
 
@@ -572,7 +642,7 @@ def image_input_capability():
         return {"supported": False, "reason": f"ویرایش خودکار برای {type(pipe).__name__} تأیید نشد: {str(error)[:180]}"}
 
 
-def edit_image(prompt, image_data_url, strength=0.65, aspect_ratio="1:1", temporary=False):
+def edit_image(prompt, image_data_url, strength=0.65, aspect_ratio="1:1", temporary=False, metadata=None):
     import torch
     from diffusers import AutoPipelineForImage2Image
     if pipe is None or active_kind not in ("image", "checkpoint"):
@@ -612,18 +682,16 @@ def edit_image(prompt, image_data_url, strength=0.65, aspect_ratio="1:1", tempor
         edited = editor(**arguments).images[0]
     if all(high <= 1 for low, high in edited.convert("RGB").getextrema()):
         raise RuntimeError("خروجی ویرایش کاملاً سیاه شد.")
-    destination = TEMP_IMAGES if temporary else OUTPUT_DIR
-    destination.mkdir(parents=True, exist_ok=True)
     name = f"edit_{datetime.now():%Y%m%d_%H%M%S_%f}.png"
-    path = destination / name
-    edited.save(path)
-    path.with_suffix(".json").write_text(json.dumps({"prompt": translated, "original_prompt": prompt,
-        "model": active_model, "source": "uploaded image"}, ensure_ascii=False), encoding="utf-8")
+    staged, path = image_paths(temporary, name)
+    edited.save(staged)
+    commit_image(staged, path, translated, prompt, active_model, aspect_ratio,
+                 {**(metadata or {}), "mode": "edit", "strength": strength})
     return {"name": name, "image": "data:image/png;base64," + base64.b64encode(path.read_bytes()).decode(),
             "translated": translated, "model": active_model, "temporary": temporary, "translation_warning": warning}
 
 
-def generate_sdcpp(prompt, translated_override=None, warning_override=False, include_image=True, aspect_ratio="1:1", temporary=False):
+def generate_sdcpp(prompt, translated_override=None, warning_override=False, include_image=True, aspect_ratio="1:1", temporary=False, metadata=None, filename=None):
     import torch
     manifest = sdcpp_models().get(active_model)
     if not manifest or active_kind != "sdcpp":
@@ -631,10 +699,9 @@ def generate_sdcpp(prompt, translated_override=None, warning_override=False, inc
     translated, translation_warning = (translated_override, warning_override) if translated_override is not None else translate_prompt(prompt.strip(), torch)
     if not translated:
         raise RuntimeError("پرامپت خالی است.")
-    destination = TEMP_IMAGES if temporary else OUTPUT_DIR
-    destination.mkdir(parents=True, exist_ok=True)
-    filename = f"image_{datetime.now():%Y%m%d_%H%M%S_%f}.png"
-    output = destination / filename
+    filename = filename or f"image_{datetime.now():%Y%m%d_%H%M%S_%f}.png"
+    staged, output = image_paths(temporary, filename)
+    staged.unlink(missing_ok=True)
     weights = manifest["weights"]
     recipe = manifest["recipe"]
     turbo = recipe in ("qwen_encoder", "qwen_turbo_generic", "krea_complete", "krea_denoiser")
@@ -647,7 +714,7 @@ def generate_sdcpp(prompt, translated_override=None, warning_override=False, inc
                *encoders, "--vae", weights["vae"],
                "-p", translated, "--steps", steps,
                "--cfg-scale", "1.0" if flux or turbo else "6.0", "--sampling-method", "euler",
-               "-W", str(width), "-H", str(height), "-o", str(output)]
+               "-W", str(width), "-H", str(height), "-o", str(staged)]
     if flux:
         command.extend(["--clip-on-cpu", "--guidance", "0" if recipe == "flux_schnell" else "3.5"])
     if recipe in ("qwen_encoder", "qwen_turbo_generic"):
@@ -660,13 +727,12 @@ def generate_sdcpp(prompt, translated_override=None, warning_override=False, inc
     completed = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                text=True, encoding="utf-8", errors="replace", env=env,
                                creationflags=creationflags, timeout=3600)
-    if completed.returncode != 0 or not output.is_file():
+    if completed.returncode != 0 or not staged.is_file():
         raise RuntimeError("ساخت تصویر با موتور تک‌فایل ناموفق بود: " + completed.stdout[-1800:])
-    with Image.open(output) as image:
+    with Image.open(staged) as image:
         if all(high <= 1 for low, high in image.convert("RGB").getextrema()):
             raise RuntimeError("خروجی مدل کاملاً سیاه شد.")
-    output.with_suffix(".json").write_text(json.dumps({"prompt": translated,
-        "original_prompt": prompt, "model": active_model}, ensure_ascii=False), encoding="utf-8")
+    commit_image(staged, output, translated, prompt, active_model, aspect_ratio, metadata)
     result = {"name": filename, "translated": translated, "model": active_model,
               "translation_warning": translation_warning, "temporary": temporary}
     if include_image:
@@ -674,7 +740,7 @@ def generate_sdcpp(prompt, translated_override=None, warning_override=False, inc
     return result
 
 
-def batch_generate(topic, count, split_cpu=False, aspect_ratio="1:1"):
+def batch_generate(topic, count, split_cpu=False, aspect_ratio="1:1", metadata=None):
     import torch
     count = int(count)
     if count < 1:
@@ -695,7 +761,7 @@ def batch_generate(topic, count, split_cpu=False, aspect_ratio="1:1"):
                       "wide angle view", "close-up view", "dreamy atmosphere", "natural light"]
         names = []
         for index in range(count):
-            result = generate_sdcpp(topic, f"{translated}, {variations[index % len(variations)]}", warning, False, aspect_ratio)
+            result = generate_sdcpp(topic, f"{translated}, {variations[index % len(variations)]}", warning, False, aspect_ratio, metadata=metadata)
             names.append(result["name"])
             emit_event("batch-progress", {"completed": len(names), "total": count,
                        "name": result["name"], "device": selected_device, "translation_warning": warning})
@@ -710,7 +776,7 @@ def batch_generate(topic, count, split_cpu=False, aspect_ratio="1:1"):
 
     def make_one(index, pipeline, device):
         prompt = f"{translated}, {variations[index % len(variations)]}"
-        result = create_image(pipeline, active_model, prompt, device, include_image=False, original_prompt=topic, aspect_ratio=aspect_ratio)
+        result = create_image(pipeline, active_model, prompt, device, include_image=False, original_prompt=topic, aspect_ratio=aspect_ratio, metadata=metadata)
         with names_lock:
             names.append(result["name"])
             completed = len(names)
@@ -729,7 +795,7 @@ def batch_generate(topic, count, split_cpu=False, aspect_ratio="1:1"):
                                   text=True, encoding="utf-8", bufsize=1,
                                   creationflags=0x08000000 if os.name == "nt" else 0)
         job = {"model_id": active_model, "model_path": models[active_model], "translated": translated, "topic": topic,
-               "start": gpu_count, "count": count, "variations": variations, "aspect_ratio": aspect_ratio}
+               "start": gpu_count, "count": count, "variations": variations, "aspect_ratio": aspect_ratio, "metadata": metadata}
         worker.stdin.write(json.dumps(job, ensure_ascii=False) + "\n")
         worker.stdin.close()
 
@@ -767,7 +833,34 @@ def batch_generate(topic, count, split_cpu=False, aspect_ratio="1:1"):
     return {"completed": len(names), "names": names, "translation_warning": warning}
 
 
-def batch_queue(topic, jobs, aspect_ratio="1:1"):
+@contextlib.contextmanager
+def lock_queue(run_id):
+    if not run_id:
+        yield
+        return
+    staging = OUTPUT_DIR / ".nocturne-pending"
+    staging.mkdir(parents=True, exist_ok=True)
+    with (staging / (run_id + ".lock")).open("a+b") as lock:
+        lock.seek(0)
+        try:
+            if os.name == "nt":
+                import msvcrt
+                msvcrt.locking(lock.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as error:
+            raise RuntimeError("This queue is still running in another process. Try again shortly.") from error
+        yield
+
+
+def batch_queue(topic, jobs, aspect_ratio="1:1", run_id="", metadata=None):
+    run_id = project_id(run_id)
+    with lock_queue(run_id):
+        return run_batch_queue(topic, jobs, aspect_ratio, run_id, metadata)
+
+
+def run_batch_queue(topic, jobs, aspect_ratio, run_id, metadata):
     import torch
     if not isinstance(topic, str):
         raise ValueError("The shared prompt must be text.")
@@ -783,7 +876,7 @@ def batch_queue(topic, jobs, aspect_ratio="1:1"):
         prompt = job.get("prompt", topic)
         ratio = job.get("aspect_ratio", aspect_ratio)
         variations = job.get("variations", True)
-        if not isinstance(model_id, str) or model_id not in available:
+        if not isinstance(model_id, str) or not model_id:
             raise ValueError(f"Job {row}: select a fully downloaded image model.")
         if type(count) is not int or not 1 <= count <= 9007199254740991:
             raise ValueError(f"Job {row}: image count must be a positive whole number.")
@@ -798,25 +891,45 @@ def batch_queue(topic, jobs, aspect_ratio="1:1"):
     styles = ["cinematic lighting", "soft morning light", "dramatic shadows", "vibrant colors",
               "minimal composition", "detailed background", "warm golden light", "cool blue tones",
               "wide angle view", "close-up view", "dreamy atmosphere", "natural light"]
-    completed, names = 0, []
+    names, saved = [], {}
+    if run_id:
+        for path in OUTPUT_DIR.glob(f"queue_{run_id}_*.png"):
+            match = re.fullmatch(rf"queue_{run_id}_(\d+)_(\d+)\.png", path.name)
+            if match and path.with_suffix(".json").is_file() and path.stat().st_size:
+                row, index = map(int, match.groups())
+                if row < len(prepared) and index < prepared[row][1]:
+                    saved.setdefault(row, set()).add(index)
+    for row, (model_id, count, *_) in enumerate(prepared):
+        if len(saved.get(row, ())) < count and model_id not in available:
+            raise ValueError(f"Job {row + 1}: select a fully downloaded image model.")
+    completed = sum(map(len, saved.values()))
     any_warning = False
     for row, (model_id, count, topic, ratio, variations) in enumerate(prepared):
+        done = saved.get(row, set())
+        row_completed = len(done)
+        emit_event("queue-progress", {"phase": "loading" if row_completed < count else "complete", "row": row,
+                   "model_id": model_id, "row_completed": row_completed, "row_total": count,
+                   "completed": completed, "total": total})
+        if row_completed == count:
+            continue
         translated, warning = translate_prompt(topic, torch)
         any_warning = any_warning or warning
-        emit_event("queue-progress", {"phase": "loading", "row": row, "model_id": model_id,
-                   "row_completed": 0, "row_total": count, "completed": completed, "total": total})
         kind = "sdcpp" if model_id in sdcpp_models() else ("checkpoint" if model_id in checkpoint_models() else "image")
         if active_model != model_id or active_kind != kind or (kind in ("image", "checkpoint") and pipe is None):
             load_model(model_id, kind)
         for index in range(count):
+            if index in done:
+                continue
+            filename = f"queue_{run_id}_{row}_{index}.png" if run_id else None
             prompt = f"{translated}, {styles[index % len(styles)]}" if variations else translated
-            result = (generate_sdcpp(topic, prompt, warning, False, ratio) if kind == "sdcpp" else
+            result = (generate_sdcpp(topic, prompt, warning, False, ratio, metadata=metadata, filename=filename) if kind == "sdcpp" else
                       create_image(pipe, model_id, prompt, selected_device, include_image=False,
-                                   original_prompt=topic, aspect_ratio=ratio))
+                                   original_prompt=topic, aspect_ratio=ratio, metadata=metadata, filename=filename))
             names.append(result["name"])
             completed += 1
+            row_completed += 1
             emit_event("queue-progress", {"phase": "generating", "row": row, "model_id": model_id,
-                       "row_completed": index + 1, "row_total": count, "completed": completed,
+                       "row_completed": row_completed, "row_total": count, "completed": completed,
                        "total": total, "name": result["name"]})
     return {"completed": completed, "names": names, "translation_warning": any_warning,
             "active_model": active_model, "loaded_models": loaded_models()}
@@ -832,7 +945,7 @@ def run_cpu_batch_worker():
     cpu_pipe.set_progress_bar_config(disable=True)
     for index in range(job["start"], job["count"]):
         prompt = f"{job['translated']}, {job['variations'][index % len(job['variations'])]}"
-        result = create_image(cpu_pipe, job["model_id"], prompt, "cpu", include_image=False, original_prompt=job["topic"], aspect_ratio=job.get("aspect_ratio", "1:1"))
+        result = create_image(cpu_pipe, job["model_id"], prompt, "cpu", include_image=False, original_prompt=job["topic"], aspect_ratio=job.get("aspect_ratio", "1:1"), metadata=job.get("metadata"))
         emit_event("batch-image", {"name": result["name"]})
     return {"completed": job["count"] - job["start"]}
 
@@ -969,8 +1082,22 @@ def missing_pipeline_parts(names, config, prefix=""):
     return missing
 
 
+def download_bytes_left(size, target, part=None):
+    try:
+        if target.stat().st_size == size:
+            return 0
+    except OSError:
+        pass
+    try:
+        partial = part if part is not None else Path(str(target) + ".part")
+        return size - min(size, partial.stat().st_size)
+    except OSError:
+        return size
+
+
 def model_info(model_id):
-    info = retry_call(lambda: HfApi().model_info(model_id, files_metadata=True, timeout=20),
+    revision = pinned_downloads().get(model_id)
+    info = retry_call(lambda: HfApi().model_info(model_id, revision=revision, files_metadata=True, timeout=20),
                       "بررسی مدل", model_id, attempts=2)
     names = [s.rfilename for s in (info.siblings or [])]
     total = sum(s.size or 0 for s in (info.siblings or []))
@@ -982,10 +1109,21 @@ def model_info(model_id):
     is_lora = "lora" in model_id.lower() or "lora" in (info.tags or [])
     download_kind = None
     image_input = None
+    plan = []
+    requirements = []
     if model_id in SDCPP_RECIPES or ("qwen-image-2.1" in model_id.lower() and has_gguf and not is_lora):
         try:
             _, files = sdcpp_weight_plan(model_id)
-            size = sum(file["size"] for file in files)
+            engine_type = "cuda" if selected_device.startswith("cuda") else "cpu"
+            engine_tag, assets = sdcpp_engine_assets(selected_device)
+            engine_dir = SDCPP_ROOT / "engine" / engine_tag / engine_type
+            ready = any((path.parent / ".ready").is_file()
+                        for path in (SDCPP_ROOT / "engine").glob(f"*/{engine_type}/sd-cli.exe"))
+            plan = [(file["size"], sdcpp_file_path(model_id, file), None) for file in files]
+            if not ready and not (engine_dir / "sd-cli.exe").is_file():
+                plan.extend((asset["size"], engine_dir / asset["name"], None) for asset in assets)
+            requirements = ["stable-diffusion.cpp", "CUDA 12" if engine_type == "cuda" else "CPU"]
+            image_input = False
             download_kind = "sdcpp"
             compatibility, reason = "sdcpp", f"آمادهٔ نصب با موتور؛ {len(files)} فایل لازم بررسی شد"
             if model_id in SDCPP_RECIPES and SDCPP_RECIPES[model_id].startswith("flux_"):
@@ -1016,6 +1154,13 @@ def model_info(model_id):
             else:
                 download_kind = kind
                 reason = f"آمادهٔ دانلود با موتور {class_name}؛ {len(selected)} فایل لازم"
+                requirements = ["Diffusers", "PyTorch"]
+                if "T5" in json.dumps(config) or "CogVideoX" in class_name:
+                    requirements.append("SentencePiece")
+                root = Path(index_file).parent.parent if index_name.startswith("merged-model/") else Path(index_file).parent
+                part_root = MODEL_CACHE / ".nocturne-parts" / model_id / info.sha
+                sizes = {file.rfilename: file.size for file in info.siblings}
+                plan = [(sizes[name], root / name, part_root / (name + ".part")) for name in selected]
             compatibility = "diffusers" if download_kind else "review"
             checkpoint = checkpoint_candidate(info)
             if not download_kind and checkpoint:
@@ -1039,6 +1184,20 @@ def model_info(model_id):
         compatibility, reason = "checkpoint", f"فایل کامل {checkpoint.rfilename} با موتور SD/SDXL قابل دریافت است"
     else:
         compatibility, reason = "review", "ساختار قابل اجرای مستقیمی برای موتورهای فعلی پیدا نشد"
+    if download_kind == "checkpoint":
+        checkpoint = checkpoint_candidate(info)
+        if checkpoint and checkpoint.lfs and checkpoint.lfs.sha256:
+            existing = cached_weight_path(model_id, checkpoint.rfilename, checkpoint.size)
+            target = Path(existing) if existing else CHECKPOINT_ROOT / model_id.replace("/", "--") / checkpoint.rfilename
+            plan = [(checkpoint.size, target, None)]
+            requirements = ["Diffusers", "PyTorch", "SD/SDXL base configuration"]
+            image_input = True
+        else:
+            download_kind = None
+    download_bytes = remaining_bytes = None
+    if plan and all(type(count) is int and count >= 0 for count, _, _ in plan):
+        download_bytes = sum(count for count, _, _ in plan)
+        remaining_bytes = sum(download_bytes_left(count, target, part) for count, target, part in plan)
     card = getattr(info, "card_data", None)
     params = getattr(card, "num_parameters", None) if card else None
     if not isinstance(params, (int, float)):
@@ -1047,7 +1206,10 @@ def model_info(model_id):
             "files": len(names), "parameters": params, "gated": bool(info.gated) and not bool(get_token()),
             "compatibility": compatibility, "download_kind": download_kind,
             "checkpoint_available": checkpoint_candidate(info) is not None,
-            "image_input": image_input,
+            "image_input": image_input, "download_bytes": download_bytes,
+            "remaining_bytes": remaining_bytes, "requirements": requirements,
+            "memory_gib": ([round(download_bytes / 1024**3 + overhead, 1) for overhead in (2, 8)]
+                           if download_bytes and download_kind in ("image", "checkpoint", "sdcpp") else None),
             "reason": reason}
 
 
@@ -2332,20 +2494,26 @@ def dispatch(action, payload):
             set_cache_mode(payload["keep_loaded"])
         return load_model(payload["model_id"], payload.get("kind", "image"))
     if action == "generate":
-        return generate_sdcpp(payload["prompt"], aspect_ratio=payload.get("aspect_ratio", "1:1"), temporary=payload.get("temporary", False)) if active_kind == "sdcpp" else generate(payload["prompt"], aspect_ratio=payload.get("aspect_ratio", "1:1"), temporary=payload.get("temporary", False))
+        return generate_sdcpp(payload["prompt"], aspect_ratio=payload.get("aspect_ratio", "1:1"), temporary=payload.get("temporary", False), metadata=image_context(payload)) if active_kind == "sdcpp" else generate(payload["prompt"], aspect_ratio=payload.get("aspect_ratio", "1:1"), temporary=payload.get("temporary", False), metadata=image_context(payload))
     if action == "image_input_capability":
         return image_input_capability()
     if action == "edit_image":
         return edit_image(payload["prompt"], payload["image"], payload.get("strength", 0.65),
-                          payload.get("aspect_ratio", "1:1"), payload.get("temporary", False))
+                          payload.get("aspect_ratio", "1:1"), payload.get("temporary", False), image_context(payload))
     if action == "save_temporary_image":
         return save_temporary_image(payload["name"])
     if action == "batch_generate":
-        return batch_generate(payload["topic"], payload["count"], payload.get("split_cpu", False), payload.get("aspect_ratio", "1:1"))
+        return batch_generate(payload["topic"], payload["count"], payload.get("split_cpu", False), payload.get("aspect_ratio", "1:1"), image_context(payload))
     if action == "batch_queue":
         if "keep_loaded" in payload:
             set_cache_mode(payload["keep_loaded"])
-        return batch_queue(payload.get("topic", ""), payload["jobs"], payload.get("aspect_ratio", "1:1"))
+        if payload.get("output_folder") and Path(payload["output_folder"]).resolve() != OUTPUT_DIR.resolve():
+            raise ValueError("Select the original output folder before resuming this queue.")
+        return batch_queue(payload.get("topic", ""), payload["jobs"], payload.get("aspect_ratio", "1:1"),
+                           payload.get("run_id", ""), image_context(payload))
+    if action == "project_reference":
+        return project_reference(payload["project_id"], payload.get("image"),
+                                 payload.get("reference_id", ""), payload.get("name", ""))
     if action == "gallery":
         return gallery()
     if action == "video_gallery":
