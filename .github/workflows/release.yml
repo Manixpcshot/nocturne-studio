@@ -1,11 +1,11 @@
-name: Windows and Android release
+name: Windows, Debian and Android release
 on:
   push:
     tags: ['v*']
   workflow_dispatch:
     inputs:
       publish:
-        description: Publish the selected release tag after both builds succeed
+        description: Publish the selected release tag after all builds succeed
         type: boolean
         default: false
 permissions:
@@ -49,6 +49,50 @@ jobs:
             ${{ runner.temp }}/release/*.zip
             ${{ runner.temp }}/release/*.sig
             ${{ runner.temp }}/release/latest.json
+          if-no-files-found: error
+
+  debian:
+    runs-on: ubuntu-24.04
+    container: debian:13
+    steps:
+      - name: Install Debian build dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          apt-get update
+          apt-get install -y --no-install-recommends ca-certificates curl git build-essential pkg-config jq \
+            libwebkit2gtk-4.1-dev libxdo-dev libayatana-appindicator3-dev librsvg2-dev libssl-dev \
+            cmake ninja-build ccache libvulkan-dev glslc spirv-headers python3 zstd
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install Rust
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --proto '=https' --tlsv1.2 --fail --silent --show-error https://sh.rustup.rs --output /tmp/nocturne-rustup.sh
+          sh /tmp/nocturne-rustup.sh -y --profile minimal --default-toolchain stable
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/ccache
+          key: debian13-native-${{ hashFiles('scripts/build-debian-release.sh') }}
+      - run: npm ci
+      - name: Build and verify the Debian package
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
+        run: bash scripts/build-debian-release.sh "$RUNNER_TEMP/debian-release"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: debian
+          path: |
+            ${{ runner.temp }}/debian-release/*.deb
+            ${{ runner.temp }}/debian-release/*.sig
+            ${{ runner.temp }}/debian-release/debian-updater.json
           if-no-files-found: error
 
   android:
@@ -115,7 +159,7 @@ jobs:
           if-no-files-found: error
 
   publish:
-    needs: [tests, windows, android]
+    needs: [tests, windows, debian, android]
     if: github.ref_type == 'tag' && (github.event_name == 'push' || inputs.publish)
     runs-on: ubuntu-latest
     permissions:
@@ -131,15 +175,21 @@ jobs:
         run: |
           set -euo pipefail
           cd release
-          sha256sum -- *.exe *.zip *.apk *.sig latest.json > SHA256SUMS.txt
+          jq --arg version "${GITHUB_REF_NAME#v}" -e -s '
+            if all(.[]; .version == $version) then
+              {version: $version, platforms: (map(.platforms) | add)}
+            else error("Update manifest version does not match the release") end
+          ' latest.json debian-updater.json > combined.json
+          mv combined.json latest.json
+          sha256sum -- *.exe *.zip *.apk *.deb *.sig latest.json > SHA256SUMS.txt
           if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --json isDraft,assets > "$RUNNER_TEMP/release.json"
             if jq -e '.isDraft | not' "$RUNNER_TEMP/release.json" >/dev/null; then
-              jq -e '[.assets[].name] | any(endswith(".exe")) and any(endswith(".zip")) and any(endswith(".apk")) and any(. == "SHA256SUMS.txt") and any(. == "latest.json") and any(endswith(".exe.sig"))' "$RUNNER_TEMP/release.json" >/dev/null
+              jq -e '[.assets[].name] | any(endswith(".exe")) and any(endswith(".zip")) and any(endswith(".apk")) and any(endswith(".deb")) and any(endswith(".deb.sig")) and any(. == "SHA256SUMS.txt") and any(. == "latest.json") and any(endswith(".exe.sig"))' "$RUNNER_TEMP/release.json" >/dev/null
               exit 0
             fi
           else
-            gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --verify-tag --draft --title "Nocturne Studio $GITHUB_REF_NAME · Windows + Android" --generate-notes
+            gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --verify-tag --draft --title "Nocturne Studio $GITHUB_REF_NAME · Windows + Debian + Android" --generate-notes
           fi
-          gh release upload "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --clobber -- *.exe *.zip *.apk *.sig latest.json SHA256SUMS.txt
+          gh release upload "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --clobber -- *.exe *.zip *.apk *.deb *.sig latest.json SHA256SUMS.txt
           gh release edit "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft=false --latest

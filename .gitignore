@@ -2,6 +2,7 @@ node_modules/
 dist/
 src-tauri/target/
 src-tauri/gen/
+src-tauri/linux-engines/
 __pycache__/
 *.py[cod]
 .test-hf-cache/

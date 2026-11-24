@@ -100,7 +100,7 @@ active_model = None
 active_kind = "image"
 loaded_pipelines = {}
 keep_loaded = False
-selected_device = "cuda:0"
+selected_device = "cuda:0" if os.name == "nt" else "cpu"
 translator = None
 translator_tokenizer = None
 tts_loaded = {}
@@ -268,7 +268,7 @@ def sdcpp_models():
             data = json.loads(manifest.read_text(encoding="utf-8"))
             valid_weights = all(Path(path).is_file() and Path(path).stat().st_size == data["sizes"][role]
                                 for role, path in data["weights"].items())
-            if valid_weights and Path(data["engine"]).is_file() and (Path(data["engine"]).parent / ".ready").is_file():
+            if valid_weights and sdcpp_manifest_engine(data).is_file() and (os.name != "nt" or (Path(data["engine"]).parent / ".ready").is_file()):
                 result[data["id"]] = data
         except (OSError, ValueError, KeyError, TypeError):
             pass
@@ -558,7 +558,7 @@ def load_model(model_id, kind="image"):
         installed = sdcpp_models().get(model_id)
         if not installed:
             raise RuntimeError("مدل و موتور آن کامل نصب نشده‌اند.")
-        if installed["device"].split(":")[0] != selected_device.split(":")[0]:
+        if os.name == "nt" and installed["device"].split(":")[0] != selected_device.split(":")[0]:
             raise RuntimeError("این مدل برای دستگاه دیگری نصب شده است؛ از بخش جست‌وجو نصب را برای دستگاه فعلی ادامه دهید.")
         if pipe is not None:
             old_key = (active_kind, active_model)
@@ -864,7 +864,8 @@ def generate_sdcpp(prompt, translated_override=None, warning_override=False, inc
     encoders = (["--clip_l", weights["clip_l"], "--t5xxl", weights["t5xxl"]] if flux else
                 ["--llm", weights["llm"]])
     steps = "4" if recipe == "flux_schnell" or recipe.startswith("flux2_klein") else "20" if recipe.startswith(("flux_dev", "flux2")) else "8" if turbo else "28"
-    command = [manifest["engine"], "--diffusion-model", weights["diffusion"],
+    engine = sdcpp_manifest_engine(manifest)
+    command = [str(engine), "--diffusion-model", weights["diffusion"],
                *encoders, "--vae", weights["vae"],
                "-p", translated, "--steps", steps,
                "--cfg-scale", "4.0" if recipe.startswith("flux2_base") else "1.0" if flux or flux2 or turbo else "6.0", "--sampling-method", "euler",
@@ -875,10 +876,10 @@ def generate_sdcpp(prompt, translated_override=None, warning_override=False, inc
         command.extend(["--clip-on-cpu", "--guidance", "0" if recipe == "flux_schnell" else "3.5"])
     if recipe in ("qwen_encoder", "qwen_turbo_generic"):
         command.extend(["--sigmas", "1.0,0.978453,0.95418,0.926626,0.89508,0.845148,0.704534,0.414568,0.0"])
-    if selected_device.startswith("cuda"):
+    if selected_device.startswith("cuda") or engine.name == "sd-cli-vulkan":
         command.append("--offload-to-cpu")
     env = os.environ.copy()
-    env["PATH"] = str(Path(manifest["engine"]).parent) + os.pathsep + env.get("PATH", "")
+    env["PATH"] = str(engine.parent) + os.pathsep + env.get("PATH", "")
     creationflags = 0x08000000 if os.name == "nt" else 0
     completed = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                text=True, encoding="utf-8", errors="replace", env=env,
@@ -1354,15 +1355,10 @@ def model_info(model_id, requested_kind=None, variant=None):
         try:
             recipe, files, variants = sdcpp_weight_plan(model_id, revisions, variant, initial_info=info)
             revisions.update({file["repo"]: file["revision"] for file in files})
-            engine_type = "cuda" if selected_device.startswith("cuda") else "cpu"
-            engine_tag, assets = sdcpp_engine_assets(selected_device)
-            engine_dir = SDCPP_ROOT / "engine" / engine_tag / engine_type
-            ready = any((path.parent / ".ready").is_file()
-                        for path in (SDCPP_ROOT / "engine").glob(f"*/{engine_type}/sd-cli.exe"))
+            engine_exe, assets, engine_type = sdcpp_installation(selected_device)
             plan = [(file["size"], sdcpp_file_path(model_id, file), None) for file in files]
-            if not ready and not (engine_dir / "sd-cli.exe").is_file():
-                plan.extend((asset["size"], engine_dir / asset["name"], None) for asset in assets)
-            requirements = ["stable-diffusion.cpp", "CUDA 12" if engine_type == "cuda" else "CPU"]
+            plan.extend((asset["size"], engine_exe.parent / asset["name"], None) for asset in assets)
+            requirements = ["stable-diffusion.cpp", {"cpu": "CPU", "cuda": "CUDA 12", "vulkan": "Vulkan"}[engine_type]]
             image_input = recipe in SDCPP_EDIT_RECIPES
             download_kind = "sdcpp"
             compatibility, reason = "sdcpp", f"آمادهٔ نصب با موتور؛ {len(files)} فایل لازم بررسی شد"
@@ -1777,6 +1773,43 @@ def sdcpp_weight_plan(model_id, revisions=None, variant=None, initial_info=None)
     return recipe, files, variants
 
 
+@lru_cache(maxsize=1)
+def linux_vulkan_available():
+    try:
+        output = subprocess.run(["vulkaninfo", "--summary"], capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return output.returncode == 0 and bool(re.search(r"PHYSICAL_DEVICE_TYPE_(DISCRETE_GPU|INTEGRATED_GPU|VIRTUAL_GPU)", output.stdout))
+
+
+def linux_sdcpp_engine():
+    directory = Path(__file__).resolve().parent / "linux-engines"
+    preference = os.environ.get("NOCTURNE_SD_ENGINE", "auto").lower()
+    vulkan = directory / "sd-cli-vulkan"
+    if preference == "vulkan" or (preference == "auto" and vulkan.is_file() and linux_vulkan_available()):
+        return vulkan, "vulkan"
+    return directory / "sd-cli-cpu", "cpu"
+
+
+def sdcpp_manifest_engine(manifest):
+    return linux_sdcpp_engine()[0] if os.name != "nt" else Path(manifest["engine"])
+
+
+def sdcpp_installation(device):
+    if os.name != "nt":
+        executable, kind = linux_sdcpp_engine()
+        if not executable.is_file() or not os.access(executable, os.X_OK):
+            raise RuntimeError(f"موتور {kind} در بستهٔ Debian پیدا نشد.")
+        return executable, [], kind
+    kind = "cuda" if device.startswith("cuda") else "cpu"
+    existing = sorted((path for path in (SDCPP_ROOT / "engine").glob(f"*/{kind}/sd-cli.exe")
+                       if path.is_file() and (path.parent / ".ready").is_file()), reverse=True)
+    if existing:
+        return existing[0], [], kind
+    tag, assets = sdcpp_engine_assets(device)
+    return SDCPP_ROOT / "engine" / tag / kind / "sd-cli.exe", assets, kind
+
+
 def sdcpp_engine_assets(device):
     kind = "cuda" if device.startswith("cuda") else "cpu"
     assets = [{"name": name, "url": f"https://github.com/leejet/stable-diffusion.cpp/releases/download/{SDCPP_RELEASE}/{name}",
@@ -1824,22 +1857,11 @@ def safe_extract_zip(archive, target):
 
 def install_sdcpp(model_id, revisions=None, variant=None, repair=False):
     recipe, files, _ = sdcpp_weight_plan(model_id, revisions, variant)
-    engine_type = "cuda" if selected_device.startswith("cuda") else "cpu"
-    existing = sorted((path for path in (SDCPP_ROOT / "engine").glob(f"*/{engine_type}/sd-cli.exe")
-                       if (path.parent / ".ready").is_file()), reverse=True)
-    if existing:
-        engine_exe = existing[0]
-        engine_dir = engine_exe.parent
-        assets = []
-    else:
-        engine_tag, assets = sdcpp_engine_assets(selected_device)
-        engine_dir = SDCPP_ROOT / "engine" / engine_tag / engine_type
-        engine_exe = engine_dir / "sd-cli.exe"
-    tasks = []
-    if not engine_exe.is_file():
-        tasks.extend({"kind": "engine", "name": asset["name"], "url": asset["url"],
-                      "size": asset["size"], "sha": asset["sha"],
-                      "destination": engine_dir / asset["name"]} for asset in assets)
+    engine_exe, assets, _ = sdcpp_installation(selected_device)
+    engine_dir = engine_exe.parent
+    tasks = [{"kind": "engine", "name": asset["name"], "url": asset["url"],
+              "size": asset["size"], "sha": asset["sha"],
+              "destination": engine_dir / asset["name"]} for asset in assets]
     tasks.extend({"kind": "weight", "name": file["name"],
                   "url": hf_hub_url(file["repo"], file["name"], revision=file["revision"]),
                   "size": file["size"], "sha": file["sha"],
@@ -1895,19 +1917,20 @@ def install_sdcpp(model_id, revisions=None, variant=None, repair=False):
         for asset in assets:
             safe_extract_zip(engine_dir / asset["name"], engine_dir)
     if not engine_exe.is_file():
-        raise RuntimeError("فایل sd-cli.exe پس از نصب موتور پیدا نشد.")
-    if assets or repair:
+        raise RuntimeError("فایل اجرایی stable-diffusion.cpp پس از نصب پیدا نشد.")
+    if assets or repair or os.name != "nt":
         try:
             test = subprocess.run([str(engine_exe), "--help"], cwd=engine_dir, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                   timeout=30, creationflags=0x08000000 if os.name == "nt" else 0)
             if b"--diffusion-model" not in test.stdout:
                 raise RuntimeError("The engine could not start or its executable is incomplete.")
         except (OSError, subprocess.TimeoutExpired, RuntimeError) as error:
-            (engine_dir / ".ready").unlink(missing_ok=True)
-            # A failed executable must be fetched/extracted again; weights remain cached.
-            engine_exe.unlink(missing_ok=True)
+            if os.name == "nt":
+                (engine_dir / ".ready").unlink(missing_ok=True)
+                engine_exe.unlink(missing_ok=True)
             raise RuntimeError(f"Engine installation failed: {error}") from error
-    (engine_dir / ".ready").write_text("verified", encoding="utf-8")
+    if os.name == "nt":
+        (engine_dir / ".ready").write_text("verified", encoding="utf-8")
     for asset in assets:
         (engine_dir / asset["name"]).unlink(missing_ok=True)
     manifest = {"id": model_id, "engine": str(engine_exe), "device": selected_device,
@@ -2332,7 +2355,7 @@ def qwen_tts_generate(model_id, text):
     if len(text) > 500:
         raise RuntimeError("برای ساخت صدا متن را به بخش‌های کوتاه‌تر از ۵۰۰ نویسه تقسیم کنید.")
     runtime = MODEL_HOME / "nocturne-qwen-runtime"
-    python = runtime / "Scripts" / "python.exe"
+    python = runtime / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
     if not python.is_file():
         subprocess.run([sys.executable, "-m", "venv", "--system-site-packages", str(runtime)],
                        stdout=sys.stderr, stderr=sys.stderr, check=True)
@@ -2742,19 +2765,25 @@ def web_public_start():
         raise RuntimeError(f"وب‌سایت روی همین سیستم پاسخ نمی‌دهد: {error}") from error
     binary = shutil.which("cloudflared")
     if not binary:
-        binary_path = MODEL_HOME / "nocturne-tools" / "cloudflared.exe"
+        linux = sys.platform == "linux"
+        binary_path = MODEL_HOME / "nocturne-tools" / ("cloudflared" if linux else "cloudflared.exe")
         if not binary_path.is_file():
             binary_path.parent.mkdir(parents=True, exist_ok=True)
             part = binary_path.with_suffix(".part")
-            url = "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe"
+            asset = "cloudflared-linux-amd64" if linux else "cloudflared-windows-amd64.exe"
+            url = f"https://github.com/cloudflare/cloudflared/releases/latest/download/{asset}"
             with requests.get(url, stream=True, timeout=(15, 45)) as response:
                 response.raise_for_status()
                 with part.open("wb") as output:
                     for chunk in response.iter_content(chunk_size=1024 * 1024):
                         output.write(chunk)
-            if part.stat().st_size < 1024**2 or part.open("rb").read(2) != b"MZ":
+            with part.open("rb") as source:
+                header = source.read(4)
+            if part.stat().st_size < 1024**2 or not header.startswith(b"\x7fELF" if linux else b"MZ"):
                 part.unlink(missing_ok=True)
                 raise RuntimeError("فایل Cloudflare Tunnel معتبر دریافت نشد")
+            if linux:
+                part.chmod(0o755)
             part.replace(binary_path)
         binary = str(binary_path)
     flags = 0x08000000 if os.name == "nt" else 0

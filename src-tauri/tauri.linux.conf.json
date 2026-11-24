@@ -1,0 +1,16 @@
+{
+  "bundle": {
+    "targets": ["deb"],
+    "createUpdaterArtifacts": false,
+    "icon": ["icons/icon.png"],
+    "resources": {
+      "linux-engines": "linux-engines"
+    },
+    "linux": {
+      "deb": {
+        "depends": ["python3", "python3-venv", "zstd", "pkexec", "libvulkan1", "libgomp1"],
+        "recommends": ["vulkan-tools", "mesa-vulkan-drivers"]
+      }
+    }
+  }
+}

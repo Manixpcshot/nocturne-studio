@@ -3,12 +3,13 @@ import json
 import hashlib
 import atexit
 import os
+import platform
+import tempfile
 from pathlib import Path
 import re
 import shutil
 import subprocess
 import time
-import zipfile
 from html.parser import HTMLParser
 
 import requests
@@ -46,7 +47,10 @@ def runtime(home, emit, install=False):
         return root
     except requests.RequestException:
         pass
-    exe = root / "engine" / "ollama.exe"
+    binary = "ollama.exe" if os.name == "nt" else "bin/ollama"
+    arch = platform.machine().lower()
+    package = ("ollama-windows-amd64.zip" if os.name == "nt" else "ollama-linux-amd64.tar.zst") if arch in ("amd64", "x86_64") else None
+    exe = root / "engine" / binary
     if not exe.is_file() or not (root / "engine" / ".ready").is_file():
         installed = Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "Ollama" / "ollama.exe"
         existing = shutil.which("ollama") or (str(installed) if installed.is_file() else None)
@@ -55,15 +59,24 @@ def runtime(home, emit, install=False):
         elif not install:
             return None
         else:
+            if package is None:
+                raise RuntimeError("بستهٔ خودکار Ollama برای این معماری موجود نیست.")
             root.mkdir(parents=True, exist_ok=True)
             emit("chat-progress", {"status": "دریافت مشخصات موتور Ollama..."})
             release = requests.get("https://api.github.com/repos/ollama/ollama/releases/latest", timeout=30)
             release.raise_for_status()
-            asset = next((a for a in release.json()["assets"] if a["name"] == "ollama-windows-amd64.zip"), None)
+            asset = next((a for a in release.json()["assets"] if a["name"] == package), None)
             if not asset:
-                raise RuntimeError("بستهٔ رسمی موتور ویندوز پیدا نشد.")
-            archive = root / "engine.zip"
-            part = root / "engine.zip.part"
+                raise RuntimeError("بستهٔ رسمی Ollama برای این سیستم‌عامل پیدا نشد.")
+            if not re.fullmatch(r"sha256:[a-f0-9]{64}", asset.get("digest") or ""):
+                raise RuntimeError("چک‌سام بستهٔ رسمی Ollama در دسترس نیست.")
+            archive = root / package
+            part = root / (package + ".part")
+            legacy = root / "engine.zip.part"
+            if os.name == "nt" and legacy.is_file() and not part.exists():
+                legacy.replace(part)
+            if part.is_file() and part.stat().st_size > asset["size"]:
+                part.unlink()
             offset = part.stat().st_size if part.exists() else 0
             if shutil.disk_usage(root).free < max(0, asset["size"] - offset) + 4 * 1024**3:
                 raise RuntimeError("فضای کافی برای دریافت و استخراج موتور نیست؛ حداقل ۴ گیگابایت فضای اضافه لازم است.")
@@ -94,13 +107,16 @@ def runtime(home, emit, install=False):
             part.replace(archive)
             destination = root / "engine"
             emit("chat-progress", {"status": "استخراج موتور..."})
-            with zipfile.ZipFile(archive) as z:
-                for entry in z.infolist():
-                    target = (destination / entry.filename).resolve()
-                    if not target.is_relative_to(destination.resolve()):
-                        raise RuntimeError("مسیر نامعتبر در بستهٔ موتور")
-                z.extractall(destination)
-            (destination / ".ready").write_text(release.json()["tag_name"], encoding="utf-8")
+            with tempfile.TemporaryDirectory(dir=root) as temporary:
+                stage = Path(temporary) / "engine"
+                llama_engine.extract_verified_engine(archive, stage)
+                if not (stage / binary).is_file():
+                    raise RuntimeError("فایل اجرایی Ollama در بسته پیدا نشد.")
+                (stage / ".ready").write_text(release.json()["tag_name"], encoding="utf-8")
+                # An older build may have left an incomplete directory.
+                if destination.is_dir() and not (destination / ".ready").is_file():
+                    destination.rename(Path(temporary) / "old")
+                stage.rename(destination)
             archive.unlink()
     env = os.environ.copy()
     env.update(OLLAMA_HOST="127.0.0.1:11439", OLLAMA_MODELS=str(root / "models"), OLLAMA_NO_CLOUD="1")
@@ -258,7 +274,7 @@ def dispatch(action, payload, home, emit):
         if payload.get("agent"):
             return generate_agent(payload, home, emit)
     if action == "chat_hf_info":
-        return hf_variants(str(payload.get("repo", "")))
+        return {**hf_variants(str(payload.get("repo", ""))), "engines": ["ollama", *llama_engine.ENGINES]}
     if action == "chat_pull" and payload.get("engine", "ollama") != "ollama":
         engine = payload["engine"]
         if engine not in llama_engine.ENGINES:

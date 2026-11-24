@@ -2,7 +2,7 @@
 
 Nocturne Studio is a Windows desktop app for generating images, video and speech, and chatting with local AI models. The app includes a model library, a gallery, a queue for image batches and Persian and English interface options.
 
-[Download the Windows release](https://github.com/Manixpcshot/nocturne-studio/releases/latest) · [راهنمای فارسی](README.fa.md)
+[Download for Windows or Debian](https://github.com/Manixpcshot/nocturne-studio/releases/latest) · [راهنمای فارسی](README.fa.md)
 
 The Android edition generates images and runs text models on the phone and recommends models based on available hardware. [Download for Android](https://github.com/Manixpcshot/nocturne-studio/releases/latest) · [Android guide](mobile/android/README.md)
 
@@ -54,9 +54,15 @@ Model files are downloaded separately. The memory and disk space required depend
 
 ![Settings in Persian with the language selector visible](docs/screenshots/settings-fa.png)
 
+## Debian 13
+
+Download the amd64 Debian package from Releases and install with `sudo apt install ./Nocturne-Studio_*_amd64.deb`. Launch **Nocturne Studio** from the application menu. The first-run setup installs Python packages into a private environment in your user data directory. The WebView and Python system dependencies are installed by APT.
+
+The Debian package includes stable-diffusion.cpp CPU and Vulkan builds. For compatible GGUF images it prefers Vulkan when a hardware GPU is detected with `vulkaninfo`. Set `NOCTURNE_SD_ENGINE=cpu` or `NOCTURNE_SD_ENGINE=vulkan` before starting the app to choose explicitly. Diffusers uses PyTorch on the CPU or a supported NVIDIA GPU. Chat on Windows and Debian offers CPU, Vulkan, NVIDIA CUDA, AMD ROCm and Intel OpenVINO llama.cpp runtimes, plus Ollama. The GPU runtimes require a compatible driver and are installed only when selected.
+
 ## App updates
 
-Install a current release manually once to enable updates. The installed Windows version checks GitHub at startup and verifies the installer signature before handing off to setup. Portable Windows copies are updated by replacing the extracted ZIP. On Android, the app downloads a newer signed APK when opened and prompts you to confirm installation.
+Install a current release manually once to enable updates. The installed Windows version checks GitHub at startup and verifies the installer signature before handing off to setup. Debian checks the signed package at startup and asks for administrator authorization before installing. Portable Windows copies are updated by replacing the extracted ZIP. On Android, the app downloads a newer signed APK when opened and prompts you to confirm installation.
 
 ## Build from source
 
@@ -69,6 +75,6 @@ npm run tauri dev
 
 Set `TAURI_SIGNING_PRIVATE_KEY` to a Tauri signing key and run `npm run tauri build` for a release installer. Locally distributed builds need a matching public key and update endpoint. The NSIS installer is generated in `src-tauri/target/release/bundle/nsis`.
 
-GitHub Actions builds the Windows installer, portable ZIP, and signed ARM64 Android APK together when a `v*` release tag is pushed. The tag matches the Windows version in `package.json`. Increase Android's `versionCode` and set its `versionName` in `mobile/android/app/build.gradle` when shipping an Android update. The release is published after all builds and regression tests pass.
+GitHub Actions builds the Windows installer, portable ZIP, Debian amd64 package and signed ARM64 Android APK together when a `v*` release tag is pushed. The tag matches the Windows version in `package.json`. Increase Android's `versionCode` and set its `versionName` in `mobile/android/app/build.gradle` when shipping an Android update. The release is published after all builds and regression tests pass.
 
 The desktop UI uses TypeScript and Vite. Tauri runs the desktop shell and communicates with the Python engine under `src-tauri/resources`. Sample images and model names in the screenshots are demonstration data.

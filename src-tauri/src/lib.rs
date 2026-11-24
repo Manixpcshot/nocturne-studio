@@ -7,6 +7,17 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::path::PathBuf;
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
+
+fn child_command(program: impl AsRef<std::ffi::OsStr>) -> Command {
+    let command = Command::new(program);
+    #[cfg(target_os = "windows")]
+    let command = {
+        let mut command = command;
+        command.creation_flags(0x08000000);
+        command
+    };
+    command
+}
 use tauri::{AppHandle, Emitter, Manager, State};
 
 #[cfg(target_os = "windows")]
@@ -36,13 +47,18 @@ async fn hardware_usage(device: String) -> Value {
                 result["ram_used"] = json!(status.total_phys - status.avail_phys);
             }
         }
+        #[cfg(target_os = "linux")]
+        if let Ok(contents) = std::fs::read_to_string("/proc/meminfo") {
+            let value = |key: &str| contents.lines().find_map(|line| {
+                line.strip_prefix(key)?.split_whitespace().next()?.parse::<u64>().ok()
+            });
+            if let (Some(total), Some(available)) = (value("MemTotal:"), value("MemAvailable:")) {
+                result["ram_total"] = json!(total * 1024);
+                result["ram_used"] = json!(total.saturating_sub(available) * 1024);
+            }
+        }
         if let Some(index) = device.strip_prefix("cuda:") {
-            #[cfg(target_os = "windows")]
-            let output = Command::new("nvidia-smi")
-                .args(["--query-gpu=memory.used,memory.total,utilization.gpu", "--format=csv,noheader,nounits", "-i", index])
-                .creation_flags(0x08000000).output();
-            #[cfg(not(target_os = "windows"))]
-            let output = Command::new("nvidia-smi")
+            let output = child_command("nvidia-smi")
                 .args(["--query-gpu=memory.used,memory.total,utilization.gpu", "--format=csv,noheader,nounits", "-i", index]).output();
             if let Ok(output) = output {
                 if output.status.success() {
@@ -60,6 +76,7 @@ async fn hardware_usage(device: String) -> Value {
     }).await.unwrap_or_else(|_| json!({}))
 }
 
+#[cfg(target_os = "windows")]
 const PYTHON_INSTALLER_URL: &str = "https://www.python.org/ftp/python/3.13.17/python-3.13.17-amd64.exe";
 const PYTHON_PACKAGES: &[(&str, &str)] = &[
     ("torch", "torch"), ("diffusers", "diffusers"), ("transformers", "transformers"),
@@ -73,9 +90,10 @@ const PYTHON_PACKAGES: &[(&str, &str)] = &[
     ("imageio", "imageio"), ("imageio_ffmpeg", "imageio-ffmpeg"),
 ];
 
-fn python_executable() -> Option<PathBuf> {
-    if let Ok(output) = Command::new("py").args(["-3.13", "-c", "import sys; print(sys.executable)"])
-        .creation_flags(0x08000000).output() {
+#[cfg(target_os = "windows")]
+fn python_executable(_app: &AppHandle) -> Option<PathBuf> {
+    if let Ok(output) = child_command("py").args(["-3.13", "-c", "import sys; print(sys.executable)"])
+        .output() {
         if output.status.success() {
             let path = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
             if path.is_file() { return Some(path); }
@@ -92,11 +110,30 @@ fn python_executable() -> Option<PathBuf> {
     None
 }
 
+#[cfg(target_os = "linux")]
+fn python_executable(app: &AppHandle) -> Option<PathBuf> {
+    let python = app.path().app_data_dir().ok()?.join("python/bin/python");
+    if python.is_file() { Some(python) } else { None }
+}
+
+fn app_storage(app: &AppHandle) -> Result<PathBuf, String> {
+    #[cfg(target_os = "windows")]
+    let path = {
+        let _ = app;
+        std::env::current_exe().map_err(|error| error.to_string())?
+            .parent().ok_or("مسیر برنامه پیدا نشد")?.to_path_buf()
+    };
+    #[cfg(target_os = "linux")]
+    let path = app.path().app_data_dir().map_err(|error| error.to_string())?;
+    std::fs::create_dir_all(&path).map_err(|error| error.to_string())?;
+    Ok(path)
+}
+
 fn missing_python_packages(python: &std::path::Path) -> Result<Vec<String>, String> {
     let modules = PYTHON_PACKAGES.iter().map(|(module, _)| *module).collect::<Vec<_>>();
     let script = format!("import importlib.util as u, json\nmissing=[]\nfor name in {}:\n try:\n  found=u.find_spec(name) is not None\n except ModuleNotFoundError:\n  found=False\n if not found: missing.append(name)\nprint(json.dumps(missing))", json!(modules));
     let script = script.replace("\nprint(json.dumps(missing))", "\nif 'sdnq' not in missing:\n try:\n  from importlib.metadata import version\n  from packaging.version import Version\n  if Version(version('sdnq')) < Version('0.2.2'): missing.append('sdnq')\n except Exception:\n  missing.append('sdnq')\nprint(json.dumps(missing))");
-    let output = Command::new(python).args(["-c", &script]).creation_flags(0x08000000)
+    let output = child_command(python).args(["-c", &script])
         .output().map_err(|e| format!("بررسی بسته‌های پایتون ناموفق بود: {e}"))?;
     if !output.status.success() {
         return Err(format!("پایتون اجرا نشد: {}", String::from_utf8_lossy(&output.stderr)));
@@ -104,8 +141,8 @@ fn missing_python_packages(python: &std::path::Path) -> Result<Vec<String>, Stri
     serde_json::from_slice(&output.stdout).map_err(|e| format!("پاسخ پایتون نامعتبر بود: {e}"))
 }
 
-fn prerequisites_status() -> Result<Value, String> {
-    let Some(python) = python_executable() else {
+fn prerequisites_status(app: &AppHandle) -> Result<Value, String> {
+    let Some(python) = python_executable(app) else {
         return Ok(json!({"ready": false, "python": false, "missing": PYTHON_PACKAGES.iter().map(|(_, package)| *package).collect::<Vec<_>>() }));
     };
     let missing_modules = missing_python_packages(&python)?;
@@ -119,11 +156,17 @@ fn emit_setup(app: &AppHandle, message: &str) {
 }
 
 fn install_package(app: &AppHandle, python: &std::path::Path, package: &str) -> Result<(), String> {
-    for mirror in [None, Some("https://pypi.tuna.tsinghua.edu.cn/simple")] {
-        let mut command = Command::new(python);
+    let mut indexes = vec![None, Some("https://pypi.tuna.tsinghua.edu.cn/simple")];
+    #[cfg(target_os = "linux")]
+    if package == "torch" && !child_command("nvidia-smi").arg("-L").output()
+        .is_ok_and(|output| output.status.success() && !output.stdout.is_empty()) {
+        indexes = vec![Some("https://download.pytorch.org/whl/cpu")];
+    }
+    for mirror in indexes.drain(..) {
+        let mut command = child_command(python);
         command.args(["-m", "pip", "install", "--timeout", "30", "--retries", "1"]);
         if let Some(url) = mirror { command.args(["--index-url", url]); }
-        command.arg(package).creation_flags(0x08000000);
+        command.arg(package);
         emit_setup(app, &format!("در حال نصب {package}{}...", if mirror.is_some() { " از مسیر جایگزین" } else { "" }));
         if let Ok(status) = command.status() {
             if status.success() { return Ok(()); }
@@ -133,8 +176,8 @@ fn install_package(app: &AppHandle, python: &std::path::Path, package: &str) -> 
 }
 
 #[tauri::command]
-async fn setup_status() -> Result<Value, String> {
-    tauri::async_runtime::spawn_blocking(prerequisites_status)
+async fn setup_status(app: AppHandle) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || prerequisites_status(&app))
         .await
         .map_err(|error| format!("بررسی پیش‌نیازها متوقف شد: {error}"))?
 }
@@ -151,13 +194,12 @@ async fn update_diffusers_engine(
             let mut guard = state.lock().map_err(|_| "موتور برنامه در دسترس نیست".to_string())?;
             *guard = None;
         }
-        let python = python_executable().ok_or("Python 3.13 پیدا نشد. راه‌اندازی اولیه را اجرا کنید.")?;
+        let python = python_executable(&app).ok_or("محیط Python پیدا نشد. راه‌اندازی اولیه را اجرا کنید.")?;
         emit_setup(&app, "در حال به‌روزرسانی موتور Diffusers...");
         let minimax = minimax.unwrap_or(false);
         let package = if minimax { "diffusers>=0.43.0" } else { "diffusers" };
-        let output = Command::new(&python)
+        let output = child_command(&python)
             .args(["-m", "pip", "install", "--upgrade", "--timeout", "30", "--retries", "2", package])
-            .creation_flags(0x08000000)
             .output().map_err(|e| format!("اجرای به‌روزرسانی ناموفق بود: {e}"))?;
         if !output.status.success() {
             let error = String::from_utf8_lossy(&output.stderr);
@@ -168,9 +210,8 @@ async fn update_diffusers_engine(
         } else {
             "import diffusers; print(diffusers.__version__)"
         };
-        let version = Command::new(&python)
+        let version = child_command(&python)
             .args(["-c", check])
-            .creation_flags(0x08000000)
             .output().map_err(|e| format!("بررسی موتور تازه ناموفق بود: {e}"))?;
         if !version.status.success() {
             let error = String::from_utf8_lossy(&version.stderr);
@@ -185,30 +226,38 @@ async fn update_diffusers_engine(
 #[tauri::command]
 async fn setup_install(app: AppHandle) -> Result<Value, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let mut python = python_executable();
-        if python.is_none() {
+        #[cfg(target_os = "linux")]
+        if python_executable(&app).is_none() {
+            emit_setup(&app, "در حال ساخت محیط مستقل Python...");
+            let runtime = app_storage(&app)?.join("python");
+            let status = child_command("python3")
+                .args(["-m", "venv"]).arg(&runtime).status()
+                .map_err(|error| format!("Python 3 یا python3-venv در دسترس نیست: {error}"))?;
+            if !status.success() { return Err("ساخت محیط Python ناموفق بود. بستهٔ python3-venv را بررسی کنید.".into()); }
+        }
+        #[cfg(target_os = "windows")]
+        if python_executable(&app).is_none() {
             emit_setup(&app, "در حال دریافت نصب‌کنندهٔ Python 3.13 از سایت رسمی...");
             let installer = std::env::temp_dir().join("nocturne-python-3.13.17-amd64.exe");
-            let download = Command::new("curl.exe").args(["--fail", "--location", "--retry", "2", "--output"])
-                .arg(&installer).arg(PYTHON_INSTALLER_URL).creation_flags(0x08000000)
+            let download = child_command("curl.exe").args(["--fail", "--location", "--retry", "2", "--output"])
+                .arg(&installer).arg(PYTHON_INSTALLER_URL)
                 .status().map_err(|e| format!("دریافت Python ناموفق بود: {e}"))?;
             if !download.success() { return Err("دریافت Python از سایت رسمی ناموفق بود.".into()); }
             emit_setup(&app, "در حال نصب Python 3.13...");
-            let installed = Command::new(&installer)
+            let installed = child_command(&installer)
                 .args(["/quiet", "InstallAllUsers=0", "PrependPath=0", "Include_launcher=1", "Include_pip=1", "Include_test=0"])
-                .creation_flags(0x08000000).status()
+                .status()
                 .map_err(|e| format!("اجرای نصب‌کنندهٔ Python ناموفق بود: {e}"))?;
             if !installed.success() { return Err("نصب Python کامل نشد.".into()); }
-            python = python_executable();
         }
-        let python = python.ok_or("Python 3.13 پس از نصب پیدا نشد.")?;
-        let pip = Command::new(&python).args(["-m", "pip", "--version"])
-            .creation_flags(0x08000000).status()
+        let python = python_executable(&app).ok_or("محیط Python پس از نصب پیدا نشد.")?;
+        let pip = child_command(&python).args(["-m", "pip", "--version"])
+            .status()
             .map_err(|e| format!("بررسی pip ناموفق بود: {e}"))?;
         if !pip.success() {
             emit_setup(&app, "در حال نصب ابزار بسته‌های Python...");
-            let status = Command::new(&python).args(["-m", "ensurepip", "--upgrade"])
-                .creation_flags(0x08000000).status()
+            let status = child_command(&python).args(["-m", "ensurepip", "--upgrade"])
+                .status()
                 .map_err(|e| format!("نصب pip ناموفق بود: {e}"))?;
             if !status.success() { return Err("نصب pip ناموفق بود.".into()); }
         }
@@ -217,7 +266,7 @@ async fn setup_install(app: AppHandle) -> Result<Value, String> {
             if missing.contains(&module.to_string()) { install_package(&app, &python, package)?; }
         }
         emit_setup(&app, "در حال بررسی نهایی پیش‌نیازها...");
-        let result = prerequisites_status()?;
+        let result = prerequisites_status(&app)?;
         if result["ready"] != true { return Err("برخی پیش‌نیازها هنوز نصب نشده‌اند. دوباره تلاش کنید.".into()); }
         Ok(result)
     }).await.map_err(|e| format!("راه‌اندازی متوقف شد: {e}"))?
@@ -257,7 +306,10 @@ impl Drop for Backend {
             if matches!(self.child.try_wait(), Ok(Some(_))) { return; }
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
+        #[cfg(unix)]
+        let _ = child_command("kill").args(["-KILL", "--", &format!("-{}", self.child.id())]).output();
         let _ = self.child.kill();
+        let _ = self.child.wait();
     }
 }
 
@@ -270,11 +322,7 @@ fn start_backend(app: &AppHandle) -> Result<Backend, String> {
     if !script.exists() {
         return Err(format!("فایل موتور برنامه پیدا نشد: {}", script.display()));
     }
-    let exe_dir = std::env::current_exe()
-        .map_err(|e| e.to_string())?
-        .parent()
-        .ok_or("مسیر برنامه پیدا نشد")?
-        .to_path_buf();
+    let exe_dir = app_storage(app)?;
     let settings = exe_dir.join("settings.json");
     let saved_settings = std::fs::read_to_string(&settings).ok()
         .and_then(|s| serde_json::from_str::<Value>(&s).ok())
@@ -285,11 +333,17 @@ fn start_backend(app: &AppHandle) -> Result<Backend, String> {
         .unwrap_or_else(|| exe_dir.join("generated_images"));
     let original_home = std::env::var("HF_HOME")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| std::env::var("USERPROFILE").map(PathBuf::from).unwrap_or_default().join(".cache/huggingface"));
+        .unwrap_or_else(|_| std::env::var(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).map(PathBuf::from).unwrap_or_default().join(".cache/huggingface"));
     let chosen_home = saved_settings.get("model_folder").and_then(Value::as_str).map(PathBuf::from)
         .unwrap_or_else(|| original_home.clone());
-    let python = python_executable().ok_or("Python 3.13 پیدا نشد. راه‌اندازی اولیه را اجرا کنید.")?;
-    let mut child = Command::new(python)
+    let python = python_executable(&app).ok_or("محیط Python پیدا نشد. راه‌اندازی اولیه را اجرا کنید.")?;
+    let mut command = child_command(python);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    let mut child = command
         .arg("-u")
         .arg(script)
         .env("NOCTURNE_IMAGES_DIR", gallery_dir)
@@ -299,7 +353,6 @@ fn start_backend(app: &AppHandle) -> Result<Backend, String> {
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
-        .creation_flags(0x08000000)
         .spawn()
         .map_err(|e| format!("اجرای Python ناموفق بود: {e}"))?;
     let stdin = child.stdin.take().ok_or("ورودی موتور پیدا نشد")?;
@@ -307,8 +360,7 @@ fn start_backend(app: &AppHandle) -> Result<Backend, String> {
     Ok(Backend { child, stdin, stdout })
 }
 
-#[tauri::command]
-fn save_folder(state: State<'_, Arc<Mutex<Option<Backend>>>>, path: String, key: &str, restart: bool) -> Result<(), String> {
+fn save_folder(app: &AppHandle, state: State<'_, Arc<Mutex<Option<Backend>>>>, path: String, key: &str, restart: bool) -> Result<(), String> {
     let folder = PathBuf::from(path);
     if !folder.is_absolute() || !folder.is_dir() {
         return Err("یک پوشهٔ معتبر انتخاب کنید.".into());
@@ -317,8 +369,7 @@ fn save_folder(state: State<'_, Arc<Mutex<Option<Backend>>>>, path: String, key:
     std::fs::OpenOptions::new().write(true).create_new(true).open(&probe)
         .map_err(|e| format!("پوشه قابل نوشتن نیست: {e}"))?;
     let _ = std::fs::remove_file(probe);
-    let exe_dir = std::env::current_exe().map_err(|e| e.to_string())?
-        .parent().ok_or("مسیر برنامه پیدا نشد")?.to_path_buf();
+    let exe_dir = app_storage(app)?;
     let settings = exe_dir.join("settings.json");
     let mut saved = std::fs::read_to_string(&settings).ok()
         .and_then(|s| serde_json::from_str::<Value>(&s).ok())
@@ -334,13 +385,13 @@ fn save_folder(state: State<'_, Arc<Mutex<Option<Backend>>>>, path: String, key:
 }
 
 #[tauri::command]
-fn set_model_folder(state: State<'_, Arc<Mutex<Option<Backend>>>>, path: String) -> Result<(), String> {
-    save_folder(state, path, "model_folder", true)
+fn set_model_folder(app: AppHandle, state: State<'_, Arc<Mutex<Option<Backend>>>>, path: String) -> Result<(), String> {
+    save_folder(&app, state, path, "model_folder", true)
 }
 
 #[tauri::command]
-fn set_output_folder(state: State<'_, Arc<Mutex<Option<Backend>>>>, path: String) -> Result<(), String> {
-    save_folder(state, path, "output_folder", false)
+fn set_output_folder(app: AppHandle, state: State<'_, Arc<Mutex<Option<Backend>>>>, path: String) -> Result<(), String> {
+    save_folder(&app, state, path, "output_folder", false)
 }
 
 fn send_backend_request(backend: &mut Backend, app: &AppHandle, action: &str, payload: Value) -> Result<Value, String> {
@@ -475,14 +526,13 @@ fn stop_backend(download: &DownloadState) -> Result<bool, String> {
     }
     download.cancelled.store(true, Ordering::SeqCst);
     #[cfg(target_os = "windows")]
-    let status = Command::new("taskkill")
+    let status = child_command("taskkill")
         .args(["/PID", &pid.to_string(), "/T", "/F"])
-        .creation_flags(0x08000000)
         .output()
         .map_err(|e| format!("لغو دانلود ناموفق بود: {e}"))?;
     #[cfg(not(target_os = "windows"))]
-    let status = Command::new("kill")
-        .arg(pid.to_string())
+    let status = child_command("kill")
+        .args(["-TERM", "--", &format!("-{pid}")])
         .output()
         .map_err(|e| format!("لغو دانلود ناموفق بود: {e}"))?;
     if !status.status.success() {
@@ -519,6 +569,8 @@ async fn install_app_update(app: tauri::AppHandle) -> Result<(), String> {
         .map_err(|error| error.to_string())?;
     if let Some(update) = updater.check().await.map_err(|error| error.to_string())? {
         update.download_and_install(|_, _| {}, || {}).await.map_err(|error| error.to_string())?;
+        #[cfg(target_os = "linux")]
+        app.restart();
     }
     Ok(())
 }

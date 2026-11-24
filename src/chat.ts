@@ -15,6 +15,9 @@ const engineLabels: Record<string, string> = {
   ollama: 'Ollama',
   'llama-cpu': 'llama.cpp · CPU',
   'llama-vulkan': 'llama.cpp · Vulkan',
+  'llama-cuda': 'llama.cpp · NVIDIA CUDA',
+  'llama-rocm': 'llama.cpp · AMD ROCm',
+  'llama-openvino': 'llama.cpp · Intel OpenVINO',
 };
 const modelKey = (model: Model) => model.id ?? model.name;
 const escape = (s: string) => s.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]!));
@@ -310,7 +313,7 @@ export function mountChat(api: { queueDownload: (id: string, payload: Record<str
             return;
           }
           target.innerHTML = `<label>نسخهٔ مدل<select data-variant>${variants.map((variant, index) => `<option value="${index}">${escape(variant.tag)} · ${(variant.size/1024**3).toFixed(2)} GB${variant.files > 1 ? ` · ${variant.files} فایل` : ''}</option>`).join('')}</select></label>
-            <label>موتور اجرا<select data-engine>${Object.entries(engineLabels).map(([key, label]) => `<option value="${key}">${label}</option>`).join('')}</select></label>
+            <label>موتور اجرا<select data-engine>${Object.entries(engineLabels).filter(([key]) => !info.engines || info.engines.includes(key)).map(([key, label]) => `<option value="${key}">${label}</option>`).join('')}</select></label>
             <small data-engine-help></small><button class="small-button">دانلود نسخهٔ انتخابی</button>`;
           const variantSelect = target.querySelector<HTMLSelectElement>('[data-variant]')!;
           const engineSelect = target.querySelector<HTMLSelectElement>('[data-engine]')!;
@@ -322,6 +325,9 @@ export function mountChat(api: { queueDownload: (id: string, payload: Record<str
             if (ollama.disabled && engineSelect.value === 'ollama') engineSelect.value = 'llama-cpu';
             const help = engineSelect.value === 'llama-vulkan' ? 'نیازمند کارت و درایور سازگار با Vulkan.'
               : engineSelect.value === 'llama-cpu' ? 'اجرا روی CPU؛ حافظهٔ اصلی سیستم برای مدل لازم است.'
+              : engineSelect.value === 'llama-cuda' ? 'برای کارت NVIDIA با درایور سازگار؛ بستهٔ CUDA جداگانه دانلود می‌شود.'
+              : engineSelect.value === 'llama-rocm' ? 'برای کارت AMD و درایور سازگار با ROCm.'
+              : engineSelect.value === 'llama-openvino' ? 'برای سخت‌افزار Intel یا پردازندهٔ سازگار با OpenVINO.'
               : 'Ollama دستگاه اجرا را انتخاب می‌کند.';
             target.querySelector('[data-engine-help]')!.textContent = help + (info.gated ? ' این مخزن به مجوز Hugging Face نیاز دارد.' : '');
           };
