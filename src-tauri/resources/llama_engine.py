@@ -77,7 +77,8 @@ def engine_ready(home, engine):
 def runtime_env(folder):
     env = os.environ.copy()
     key = "PATH" if os.name == "nt" else "LD_LIBRARY_PATH"
-    env[key] = os.pathsep.join(filter(None, (str(folder), env.get(key))))
+    paths = (str(folder), env.get(key)) if os.name == "nt" else (str(folder), str(folder / "lib"), str(folder / "lib64"), env.get(key))
+    env[key] = os.pathsep.join(filter(None, paths))
     return env
 
 
@@ -149,6 +150,11 @@ def install_engine(home, engine, emit):
                     break
                 content = children[0]
             shutil.copytree(content, extracted, dirs_exist_ok=True, symlinks=True)
+            if content.name == "bin":
+                for lib in ("lib", "lib64"):
+                    sibling = content.parent / lib
+                    if sibling.is_dir():
+                        shutil.copytree(sibling, extracted / lib, dirs_exist_ok=True, symlinks=True)
             completed += received
         candidate = extracted / exe.name
         if not candidate.is_file():

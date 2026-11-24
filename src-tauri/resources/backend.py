@@ -2109,8 +2109,102 @@ def download(model_id, kind="image", revisions=None, variant=None, repair=False)
     return {"id": model_id, "size_gb": round(total / 1024**3, 1)}
 
 
+PIPER_REPO = "rhasspy/piper-voices"
+PIPER_REVISION = "e5349433ed883a32f893a434dc43a6c66b95ef7c"
+PIPER_VOICES = {
+    "Piper/fa_IR-amir-medium": ("amir", 63221984, 6067, "e8c2f4c8381bec787bec81cedf6d0b32ddeb5eaeb136cc1c554014614eefe443"),
+    "Piper/fa_IR-ganji-medium": ("ganji", 63516050, 4958, "6a98504bb77dc2fd3a863c977d37e67a6a525fdf661917385d569a3ff78e6cae"),
+}
+
+
+def piper_files(model_id):
+    voice, weight_size, config_size, digest = PIPER_VOICES[model_id]
+    filename = f"fa_IR-{voice}-medium.onnx"
+    upstream = f"fa/fa_IR/{voice}/medium/{filename}"
+    folder = MODEL_CACHE / "models--rhasspy--piper-voices" / "snapshots" / PIPER_REVISION
+    partial = MODEL_CACHE / ".nocturne-parts" / model_id / PIPER_REVISION / (filename + ".part")
+    weight = folder / upstream
+    return upstream, weight, weight.with_suffix(".onnx.json"), partial, weight_size, config_size, digest
+
+
+def piper_info(model_id):
+    _, weight, config, partial, size, config_size, _ = piper_files(model_id)
+    files = [(size, weight, partial), (config_size, config, None)]
+    return {"engine": "Piper · ONNX Runtime", "reason": "صدای فارسی آفلاین روی CPU",
+            "size_gb": round((size + config_size) / 1024**3, 2), "download_kind": "voice", "gated": False,
+            "requirements": ["Piper", "ONNX Runtime (CPU)"], "revisions": {model_id: PIPER_REVISION},
+            "download_bytes": size + config_size, "remaining_bytes": sum(download_bytes_left(*file) for file in files),
+            **describe_download_plan(files, reserve=256 * 1024**2)}
+
+
+def piper_download(model_id):
+    upstream, weight, config, part, size, config_size, digest = piper_files(model_id)
+    started = time.monotonic()
+    received = 0
+
+    def progress(position, amount):
+        nonlocal received
+        received += amount
+        emit_progress({"model_id": model_id, "phase": "transferring", "file": weight.name,
+                       "processed": position + config_size, "received": received,
+                       "total": size + config_size, "speed": received / max(time.monotonic() - started, .001)})
+
+    hf_hub_download(PIPER_REPO, upstream + ".json", revision=PIPER_REVISION, cache_dir=MODEL_CACHE)
+    if not valid_download(config, config_size):
+        raise RuntimeError("پیکربندی صدای Piper کامل دریافت نشد.")
+    for attempt in range(1, 13):
+        try:
+            download_resumable(hf_hub_url(PIPER_REPO, upstream, revision=PIPER_REVISION),
+                               part, weight, size, digest, progress, lambda _: None)
+            break
+        except Exception as error:
+            if attempt == 12 or permanent_download_error(error):
+                raise
+            emit_progress({"model_id": model_id, "phase": "retrying", "attempt": attempt})
+            time.sleep(min(3 * attempt, 20))
+    ensure_package("piper-tts==1.8.0", "piper")
+    emit_progress({"model_id": model_id, "phase": "complete", "processed": size + config_size, "total": size + config_size})
+    return {"id": model_id}
+
+
+def piper_generate(model_id, text):
+    _, weight, config, _, size, config_size, _ = piper_files(model_id)
+    if not valid_download(weight, size) or not valid_download(config, config_size):
+        raise RuntimeError("مدل Piper کامل دانلود نشده است.")
+    ensure_package("piper-tts==1.8.0", "piper")
+    folder = OUTPUT_DIR / "audio"
+    folder.mkdir(parents=True, exist_ok=True)
+    name = f"voice_{datetime.now():%Y%m%d_%H%M%S_%f}.wav"
+    target = folder / name
+    stage = target.with_suffix(".wav.part")
+    program = (
+        "import sys,wave; from piper import PiperVoice; "
+        "voice=PiperVoice.load(sys.argv[1]); "
+        "out=wave.open(sys.argv[2], 'wb'); "
+        "voice.synthesize_wav(sys.stdin.read(), out); out.close()"
+    )
+    try:
+        result = subprocess.run([sys.executable, "-X", "utf8", "-c", program, str(weight), str(stage)],
+                                input=text.strip(), capture_output=True, text=True, encoding="utf-8",
+                                errors="replace", timeout=120, creationflags=0x08000000 if os.name == "nt" else 0)
+        if result.returncode:
+            raise RuntimeError("Piper: " + result.stderr[-1500:])
+        with wave.open(str(stage), "rb") as output:
+            if output.getnframes() <= 0:
+                raise RuntimeError("Piper صدایی تولید نکرد.")
+        stage.replace(target)
+        target.with_suffix(".json").write_text(json.dumps({"text": text, "model": model_id}, ensure_ascii=False), encoding="utf-8")
+        return {"name": name, "model": model_id}
+    finally:
+        stage.unlink(missing_ok=True)
+
+
 def tts_search(query):
     query = query.strip().lower()
+    piper = [{"id": voice, "language": "فارسی · Piper", "downloads": 0, "engine": "Piper"}
+             for voice in PIPER_VOICES if not query or query in ("پایپر", "فارسی", "persian", "farsi", "fas", "piper") or query in voice.lower()]
+    if query in ("پایپر", "piper") or query.startswith("piper/"):
+        return piper
     language_names = {"فارسی": "fas", "persian": "fas", "english": "eng", "انگلیسی": "eng",
                       "عربی": "ara", "arabic": "ara", "turkish": "tur", "ترکی": "tur",
                       "french": "fra", "فرانسوی": "fra", "german": "deu", "آلمانی": "deu"}
@@ -2131,10 +2225,12 @@ def tts_search(query):
                 "downloads": item.downloads or 0, "engine": "Qwen3-TTS" if item.id in QWEN_TTS_MODELS else
                 "VITS" if "mms-tts" in item.id.lower() else "نیازمند بررسی"}
                for item in {item.id: item for item in found}.values() if item.pipeline_tag in ("text-to-speech", None)]
-    return sorted(results, key=lambda item: (item["engine"] in ("VITS", "Qwen3-TTS"), item["downloads"]), reverse=True)[:200]
+    return (piper + sorted(results, key=lambda item: (item["engine"] in ("VITS", "Qwen3-TTS"), item["downloads"]), reverse=True))[:200]
 
 
 def tts_info(model_id):
+    if model_id in PIPER_VOICES:
+        return piper_info(model_id)
     info = retry_call(lambda: HfApi().model_info(model_id, files_metadata=True, timeout=20),
                       "بررسی مدل صدا", model_id, attempts=2)
     size = info.used_storage or sum(s.size or 0 for s in info.siblings or [])
@@ -2170,7 +2266,12 @@ QWEN_TTS_MODELS = ("Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice", "Qwen/Qwen3-TTS-12Hz-
 
 
 def tts_installed():
-    return sorted({name for name, _ in tts_paths()})
+    installed = {name for name, _ in tts_paths()}
+    for model_id in PIPER_VOICES:
+        _, weight, config, _, size, config_size, _ = piper_files(model_id)
+        if valid_download(weight, size) and valid_download(config, config_size):
+            installed.add(model_id)
+    return sorted(installed)
 
 
 def tts_paths():
@@ -2191,6 +2292,8 @@ def tts_paths():
 
 
 def tts_download(model_id, revision=None):
+    if model_id in PIPER_VOICES:
+        return piper_download(model_id)
     if model_id in QWEN_TTS_MODELS:
         return qwen_tts_download(model_id, revision)
     info = retry_call(lambda: HfApi().model_info(model_id, revision=revision, files_metadata=True, timeout=20),
@@ -2296,6 +2399,8 @@ def qwen_tts_download(model_id, revision=None):
 def tts_generate(model_id, text):
     if not text.strip() or len(text) > 500:
         raise RuntimeError("متن صدا باید بین ۱ تا ۵۰۰ نویسه باشد.")
+    if model_id in PIPER_VOICES:
+        return piper_generate(model_id, text)
     if model_id in QWEN_TTS_MODELS:
         return qwen_tts_generate(model_id, text)
     request = json.dumps({"model_id": model_id, "text": text, "device": selected_device}, ensure_ascii=False)

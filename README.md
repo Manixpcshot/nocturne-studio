@@ -58,7 +58,7 @@ Model files are downloaded separately. The memory and disk space required depend
 
 Download the amd64 Debian package from Releases and install with `sudo apt install ./Nocturne-Studio_*_amd64.deb`. Launch **Nocturne Studio** from the application menu. The first-run setup installs Python packages into a private environment in your user data directory. The WebView and Python system dependencies are installed by APT.
 
-The Debian package includes stable-diffusion.cpp CPU and Vulkan builds. For compatible GGUF images it prefers Vulkan when a hardware GPU is detected with `vulkaninfo`. Set `NOCTURNE_SD_ENGINE=cpu` or `NOCTURNE_SD_ENGINE=vulkan` before starting the app to choose explicitly. Diffusers uses PyTorch on the CPU or a supported NVIDIA GPU. Chat on Windows and Debian offers CPU, Vulkan, NVIDIA CUDA, AMD ROCm and Intel OpenVINO llama.cpp runtimes, plus Ollama. The GPU runtimes require a compatible driver and are installed only when selected.
+The Debian package includes stable-diffusion.cpp CPU and Vulkan builds. For compatible GGUF images it prefers Vulkan when a hardware GPU is detected with `vulkaninfo`. Set `NOCTURNE_SD_ENGINE=cpu` or `NOCTURNE_SD_ENGINE=vulkan` before starting the app to choose explicitly. Diffusers uses PyTorch on the CPU or a supported NVIDIA GPU. Chat on Windows and Debian offers CPU, Vulkan, NVIDIA CUDA, AMD ROCm and Intel OpenVINO llama.cpp runtimes, plus Ollama. The GPU runtimes require a compatible driver and are installed only when selected. Search for “Piper” in the voice model catalog for the Amir and Ganji Persian ONNX voices.
 
 ## App updates
 
