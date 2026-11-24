@@ -1572,7 +1572,7 @@ def download_resumable(url, part_path, destination, expected_size, expected_sha,
         offset = 0
         if notify:
             notify("restarting")
-    if offset < expected_size:
+    while offset < expected_size:
         headers = {"Accept-Encoding": "identity"}
         if offset:
             headers["Range"] = f"bytes={offset}-"
@@ -1583,33 +1583,39 @@ def download_resumable(url, part_path, destination, expected_size, expected_sha,
         with requests.get(url, headers=headers, stream=True, timeout=(15, 35)) as response:
             response.raise_for_status()
             mode = "ab"
-            if offset:
+            end = expected_size
+            if response.status_code == 206:
                 content_range = response.headers.get("Content-Range", "")
-                if response.status_code == 200:
-                    content_length = response.headers.get("Content-Length")
-                    if content_length and content_length != str(expected_size):
-                        raise RuntimeError("The server returned a file with an unexpected size.")
+                match = re.fullmatch(rf"bytes {offset}-([0-9]{{1,19}})/{expected_size}", content_range)
+                if not match or not offset <= int(match[1]) < expected_size:
+                    raise RuntimeError("The server returned an invalid range; the partial file was kept.")
+                end = int(match[1]) + 1
+            elif response.status_code == 200:
+                content_length = response.headers.get("Content-Length")
+                if content_length is not None and content_length != str(expected_size):
+                    raise RuntimeError("The server returned a file with an unexpected size.")
+                if offset:
                     offset, mode = 0, "wb"
                     if notify:
                         notify("restarting")
-                elif response.status_code != 206 or not re.fullmatch(rf"bytes {offset}-\d+/{expected_size}", content_range):
-                    raise RuntimeError("The server returned an invalid range; the partial file was kept.")
-            elif response.status_code != 200:
-                raise RuntimeError("Unexpected response for the start of a file.")
+            else:
+                raise RuntimeError("Unexpected response for a model file.")
             rate = getattr(TRANSFER_LIMIT, "bytes_per_sec", 0)
             transferred, started = 0, time.monotonic()
             with part_path.open(mode, buffering=0) as output:
                 for chunk in response.iter_content(chunk_size=256 * 1024):
                     if not chunk:
                         continue
-                    if offset + len(chunk) > expected_size:
-                        raise RuntimeError("The server returned more data than expected.")
+                    if offset + len(chunk) > end:
+                        raise RuntimeError("The server returned more data than expected for this range.")
                     output.write(chunk)
                     offset += len(chunk)
                     transferred += len(chunk)
                     if rate:
                         time.sleep(max(0, transferred / rate - (time.monotonic() - started)))
                     progress(offset, len(chunk))
+            if offset != end:
+                raise RuntimeError(f"Connection interrupted: {offset} of {expected_size} bytes.")
     if offset != expected_size:
         raise RuntimeError(f"Connection interrupted: {offset} of {expected_size} bytes.")
     if notify:

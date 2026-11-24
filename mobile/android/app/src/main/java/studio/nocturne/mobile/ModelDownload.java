@@ -123,9 +123,15 @@ final class ModelDownload {
             if (status == 206) {
                 String header = connection.getHeaderField("Content-Range");
                 var range = RANGE.matcher(header == null ? "" : header);
-                if (!range.matches() || Long.parseLong(range.group(1)) != offset
-                        || Long.parseLong(range.group(3)) != model.bytes()) throw new Permanent("range");
-                long lastByte = Long.parseLong(range.group(2));
+                if (!range.matches()) throw new Permanent("range");
+                long lastByte;
+                try {
+                    if (Long.parseLong(range.group(1)) != offset || Long.parseLong(range.group(3)) != model.bytes())
+                        throw new Permanent("range");
+                    lastByte = Long.parseLong(range.group(2));
+                } catch (NumberFormatException invalid) {
+                    throw new Permanent("range");
+                }
                 if (lastByte < offset || lastByte >= model.bytes()) throw new Permanent("range");
                 end = lastByte + 1;
             } else if (status == 200 && offset == 0) {

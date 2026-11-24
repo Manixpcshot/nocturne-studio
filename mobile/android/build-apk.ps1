@@ -7,6 +7,7 @@ param(
     [string]$VulkanBuild,
     [string]$VulkanHeaders,
     [string]$SpirvConfig,
+    [string]$SigningKey,
     [ValidateSet('arm64-v8a', 'x86_64')][string]$Abi = 'arm64-v8a',
     [ValidateRange(1,16)][int]$Jobs = 5
 )
@@ -15,6 +16,10 @@ $Sdk = (Resolve-Path $Sdk).Path
 $Output = [System.IO.Path]::GetFullPath($Output)
 $pin = '3b12781fac1a22eda27ad0f08d0884ef816f24d7'
 $app = Join-Path $PSScriptRoot 'app/src/main'
+$gradle = Get-Content (Join-Path $PSScriptRoot 'app/build.gradle') -Raw
+$versionName = [regex]::Match($gradle, "versionName\s+'([^']+)'").Groups[1].Value
+$versionCode = [regex]::Match($gradle, 'versionCode\s+(\d+)').Groups[1].Value
+if (!$versionName -or !$versionCode) { throw 'Android version is missing from app/build.gradle.' }
 $tools = Join-Path $Sdk 'build-tools/35.0.0'
 $ndk = Join-Path $Sdk 'ndk/27.2.12479018'
 $cmakeBin = Join-Path $Sdk 'cmake/3.31.6/bin'
@@ -89,7 +94,7 @@ if ($VulkanHeaders -or $SpirvConfig) {
 Invoke-Checked "$tools/aapt2.exe" @('compile','--dir',"$app/res",'-o',$resources)
 Invoke-Checked "$tools/aapt2.exe" @('link','-I',$platform,'--manifest',"$app/AndroidManifest.xml",
     '--java',$generated,'-A',"$app/assets",'--min-sdk-version','28','--target-sdk-version','35',
-    '--version-name','0.2.1','--version-code','3','--rename-manifest-package','studio.nocturne.mobile',
+    '--version-name',$versionName,'--version-code',$versionCode,'--rename-manifest-package','studio.nocturne.mobile',
     '--debug-mode','-o',$base,$resources)
 $javaSources = @(Get-ChildItem -Path $projectJava,$generated -Filter '*.java' -Recurse | Select-Object -ExpandProperty FullName)
 Invoke-Checked $javac (@('-encoding','UTF-8','--release','11','-classpath',$platform,'-d',$classes) + $javaSources)
@@ -99,8 +104,8 @@ Invoke-Checked "$tools/d8.bat" @('--lib',$platform,'--min-api','28','--output',$
 Invoke-Checked $jar @('--update','--file',$base,'-C',$dex,'classes.dex','-C',$payload,'lib')
 Invoke-Checked "$tools/zipalign.exe" @('-p','-f','4',$base,$aligned)
 
-$key = Join-Path $PSScriptRoot 'build/nocturne-debug.jks'
-if (!(Test-Path $key)) {
+$key = if ($SigningKey) { (Resolve-Path -LiteralPath $SigningKey).Path } else { Join-Path $PSScriptRoot 'build/nocturne-debug.jks' }
+if (!(Test-Path -LiteralPath $key)) {
     Invoke-Checked $keytool @('-genkeypair','-keystore',$key,'-storepass','android','-keypass','android',
         '-alias','androiddebugkey','-keyalg','RSA','-keysize','2048','-validity','10000',
         '-dname','CN=Nocturne Development, O=Nocturne, C=US')

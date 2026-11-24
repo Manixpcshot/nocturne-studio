@@ -4,7 +4,7 @@ Nocturne Studio is a Windows desktop app for generating images, video and speech
 
 [Download the Windows release](https://github.com/Manixpcshot/nocturne-studio/releases/latest) · [راهنمای فارسی](README.fa.md)
 
-The Android edition generates images on the phone and recommends models based on available hardware. [Download for Android](https://github.com/Manixpcshot/nocturne-studio/releases/tag/mobile-v0.2.1) · [Android guide](mobile/android/README.md)
+The Android edition generates images on the phone and recommends models based on available hardware. [Download for Android](https://github.com/Manixpcshot/nocturne-studio/releases/latest) · [Android guide](mobile/android/README.md)
 
 ![Nocturne Studio 2.0 home with shortcuts to each workspace](docs/screenshots/home.png)
 
@@ -64,5 +64,7 @@ npm run tauri dev
 ```
 
 Run `npm run tauri build` for a release installer. The NSIS installer is generated in `src-tauri/target/release/bundle/nsis`.
+
+GitHub Actions builds the Windows installer, portable ZIP, and signed ARM64 Android APK together when a `v*` release tag is pushed. The tag matches the Windows version in `package.json`. Increase Android's `versionCode` and set its `versionName` in `mobile/android/app/build.gradle` when shipping an Android update. The release is published after all builds and regression tests pass.
 
 The desktop UI uses TypeScript and Vite. Tauri runs the desktop shell and communicates with the Python engine under `src-tauri/resources`. Sample images and model names in the screenshots are demonstration data.

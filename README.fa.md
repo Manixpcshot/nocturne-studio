@@ -4,7 +4,7 @@ Nocturne Studio برنامهٔ ویندوزی برای ساخت تصویر، و�
 
 [دریافت نسخهٔ ویندوز](https://github.com/Manixpcshot/nocturne-studio/releases/latest) · [English](README.md)
 
-نسخهٔ اندروید تصویر را روی خود گوشی می‌سازد و مدل‌های متناسب با سخت‌افزار را پیشنهاد می‌دهد. [دانلود نسخهٔ اندروید](https://github.com/Manixpcshot/nocturne-studio/releases/tag/mobile-v0.2.1) · [راهنمای اندروید](mobile/android/README.md)
+نسخهٔ اندروید تصویر را روی خود گوشی می‌سازد و مدل‌های متناسب با سخت‌افزار را پیشنهاد می‌دهد. [دانلود نسخهٔ اندروید](https://github.com/Manixpcshot/nocturne-studio/releases/latest) · [راهنمای اندروید](mobile/android/README.md)
 
 ![صفحهٔ خانهٔ ناکترن استودیو ۲ با میان‌بر ابزارها](docs/screenshots/home-fa.png)
 

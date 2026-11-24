@@ -2,7 +2,7 @@
 
 Android edition of Nocturne Studio for text-to-image on the phone. The app needs internet to download model weights. Image generation, prompts, and the gallery work locally after installation. Images can be exported as PNG through the system file picker.
 
-[Download Nocturne Mobile 0.2.1](https://github.com/Manixpcshot/nocturne-studio/releases/tag/mobile-v0.2.1)
+[Download Nocturne Mobile](https://github.com/Manixpcshot/nocturne-studio/releases/latest)
 
 ![Android image studio in English](screenshots/studio-en.png)
 ![Android model library in Persian](screenshots/models-fa.png)
