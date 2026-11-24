@@ -85,14 +85,11 @@ jobs:
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
-        run: bash scripts/build-debian-release.sh "$RUNNER_TEMP/debian-release"
+        run: bash scripts/build-debian-release.sh debian-release
       - uses: actions/upload-artifact@v4
         with:
           name: debian
-          path: |
-            ${{ runner.temp }}/debian-release/*.deb
-            ${{ runner.temp }}/debian-release/*.sig
-            ${{ runner.temp }}/debian-release/debian-updater.json
+          path: debian-release/
           if-no-files-found: error
 
   android:
@@ -174,14 +171,6 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cd release
-          jq --arg version "${GITHUB_REF_NAME#v}" -e -s '
-            if all(.[]; .version == $version) then
-              {version: $version, platforms: (map(.platforms) | add)}
-            else error("Update manifest version does not match the release") end
-          ' latest.json debian-updater.json > combined.json
-          mv combined.json latest.json
-          sha256sum -- *.exe *.zip *.apk *.deb *.sig latest.json > SHA256SUMS.txt
           if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --json isDraft,assets > "$RUNNER_TEMP/release.json"
             if jq -e '.isDraft | not' "$RUNNER_TEMP/release.json" >/dev/null; then
@@ -191,5 +180,13 @@ jobs:
           else
             gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --verify-tag --draft --title "Nocturne Studio $GITHUB_REF_NAME · Windows + Debian + Android" --generate-notes
           fi
+          cd release
+          jq --arg version "${GITHUB_REF_NAME#v}" -e -s '
+            if all(.[]; .version == $version) then
+              {version: $version, platforms: (map(.platforms) | add)}
+            else error("Update manifest version does not match the release") end
+          ' latest.json debian-updater.json > combined.json
+          mv combined.json latest.json
+          sha256sum -- *.exe *.zip *.apk *.deb *.sig latest.json > SHA256SUMS.txt
           gh release upload "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --clobber -- *.exe *.zip *.apk *.deb *.sig latest.json SHA256SUMS.txt
           gh release edit "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft=false --latest
