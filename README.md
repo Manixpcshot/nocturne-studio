@@ -4,6 +4,8 @@ Nocturne Studio is a Windows desktop app for generating images, video and speech
 
 [Download the Windows release](https://github.com/Manixpcshot/nocturne-studio/releases/latest) · [راهنمای فارسی](README.fa.md)
 
+The Android edition generates images on the phone and recommends models based on available hardware. [Download for Android](https://github.com/Manixpcshot/nocturne-studio/releases/tag/mobile-v0.2.1) · [Android guide](mobile/android/README.md)
+
 ![Nocturne Studio 2.0 home with shortcuts to each workspace](docs/screenshots/home.png)
 
 Version 2.0 introduces a new app icon, a graphite-and-peach theme and a home screen with shortcuts to the studios, model library and gallery. The image studio keeps its Create, Edit and Compare modes in a dedicated toolbar. Choose your theme and startup page in Settings.

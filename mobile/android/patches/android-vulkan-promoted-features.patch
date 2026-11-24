@@ -1,0 +1,24 @@
+diff --git a/src/ggml-vulkan/ggml-vulkan.cpp b/src/ggml-vulkan/ggml-vulkan.cpp
+--- a/src/ggml-vulkan/ggml-vulkan.cpp
++++ b/src/ggml-vulkan/ggml-vulkan.cpp
+@@ -4984,15 +4984,18 @@
+             throw std::runtime_error("Unsupported device");
+         }
+ 
+-        device_extensions.push_back("VK_KHR_16bit_storage");
++        // Android drivers may expose promoted features without their legacy extension names.
++        if (device->properties.apiVersion < VK_API_VERSION_1_1) {
++            device_extensions.push_back("VK_KHR_16bit_storage");
++        }
+ 
+ #ifdef GGML_VULKAN_VALIDATE
+         device_extensions.push_back("VK_KHR_shader_non_semantic_info");
+ #endif
+ 
+-        if (device->fp16) {
++        if (device->fp16 && device->properties.apiVersion < VK_API_VERSION_1_2) {
+             device_extensions.push_back("VK_KHR_shader_float16_int8");
+         }
+ 
+ #if defined(VK_KHR_cooperative_matrix)
+         if (device->coopmat_support) {

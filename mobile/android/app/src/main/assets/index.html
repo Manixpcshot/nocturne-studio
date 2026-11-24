@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en" dir="ltr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; font-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'; frame-src 'none'">
+  <meta name="theme-color" content="#0a101b">
+  <link rel="stylesheet" href="studio.css">
+  <script defer src="studio.js"></script>
+  <title>Nocturne Studio</title>
+</head>
+<body>
+  <header class="top">
+    <div class="brand"><img src="brand.svg" alt="" width="39" height="39"><div><strong>Nocturne</strong><small>Mobile Studio</small></div></div>
+    <button id="language" class="language" data-action="language">فارسی</button>
+  </header>
+  <div id="activity-strip" class="activity-strip" hidden></div>
+  <main id="surface" tabindex="-1">
+    <section id="studio" class="screen">
+      <h1 class="sr" data-text="studio">Studio</h1>
+      <div class="workspace">
+      <div id="canvas" class="canvas">
+        <div class="canvas-copy">
+          <span class="local"><i></i><span data-text="local">On-device generation</span></span>
+          <h2 data-text="hero">Image studio</h2>
+          <p data-text="heroBody">Create on your phone, even offline.</p>
+        </div>
+      </div>
+      <div class="composer">
+        <div class="composer-top">
+          <label for="prompt" data-text="prompt">Prompt</label>
+          <div class="prompt-actions">
+            <button class="quiet sample" data-action="clearPrompt" data-text="clearPrompt">Clear</button>
+            <button class="quiet sample" data-action="example" data-text="example">Try a prompt</button>
+          </div>
+        </div>
+        <textarea id="prompt" dir="auto" rows="3" maxlength="1500" data-placeholder="promptHint" placeholder="Describe the image you want…"></textarea>
+        <div class="composer-foot"><span id="count">0 / 1500</span></div>
+        <div class="generation-options">
+          <div class="option"><span data-text="models">Models</span><div id="model-picker"></div></div>
+          <div class="option"><label for="engine-select" data-text="engine">Image engine</label><div id="engine-picker"></div></div>
+        </div>
+        <div id="generation-status" role="status"></div>
+        <div id="generate-actions"></div>
+      </div>
+      </div>
+      <p class="hint" data-text="offlineNote">Once a model is installed, you can create without internet.</p>
+    </section>
+    <section id="models" class="screen" hidden>
+      <h1 data-text="models">Models</h1>
+      <p class="lead" data-text="modelIntro">Choose an image model for your phone.</p>
+      <div id="recommendation"></div>
+      <div id="transfer-shelf"></div>
+      <label class="catalog-search"><span class="sr" data-text="search">Search models</span><input id="catalog-query" type="search" dir="auto" autocomplete="off" data-placeholder="search" placeholder="Search models"></label>
+      <div id="model-filters" class="filters"></div>
+      <div id="model-list" class="list"></div>
+      <p class="hint" data-text="modelEstimate">Compatibility estimates use reported RAM. Speed also depends on your processor and available memory.</p>
+    </section>
+    <section id="gallery" class="screen" hidden>
+      <h1 data-text="gallery">Gallery</h1>
+      <p class="lead" id="gallery-count"></p>
+      <label id="gallery-search" class="catalog-search gallery-search" hidden>
+        <span class="sr" data-text="searchPhotos">Search images</span>
+        <input id="gallery-query" type="search" dir="auto" autocomplete="off" data-placeholder="searchPhotos" placeholder="Search images">
+      </label>
+      <div id="photo-list"></div>
+    </section>
+    <section id="device" class="screen" hidden>
+      <div class="title-row"><h1 data-text="device">Device</h1><button class="quiet" data-action="refresh" data-text="refresh">Refresh</button></div>
+      <p class="lead" data-text="deviceIntro">Hardware and capacity reported by Android.</p>
+      <div id="device-details"></div>
+      <h2 class="section-title" data-text="engine">Image engine</h2>
+      <div id="engine-list" class="engine-list"></div>
+    </section>
+  </main>
+  <nav class="nav" id="nav" aria-label="Nocturne"></nav>
+  <div id="toast" class="toast" role="status" hidden></div>
+  <dialog id="viewer" class="viewer" aria-label="Image">
+    <div class="viewer-top"><strong data-text="preview">Image preview</strong><button id="close-preview" data-action="closePreview" class="quiet" data-text="close">Close</button></div>
+    <div id="viewer-media" class="viewer-media" data-zoom="1" dir="ltr"><img id="full-image" alt=""></div>
+    <div id="viewer-controls" class="viewer-controls"></div>
+    <div id="viewer-notice" class="viewer-notice" role="status" hidden></div>
+    <div class="viewer-bottom" id="photo-details"></div>
+  </dialog>
+  <dialog id="confirm" class="confirm" aria-labelledby="confirm-title">
+    <form method="dialog">
+      <h2 id="confirm-title"></h2>
+      <p id="confirm-copy"></p>
+      <div class="confirm-actions"><button class="quiet" value="cancel" data-text="keep">Keep</button><button class="primary" value="remove" data-text="remove">Remove</button></div>
+    </form>
+  </dialog>
+</body>
+</html>
