@@ -1,1 +1,2 @@
-<resources><string name="export_failed">Could not save image</string></resources>
+<resources><string name="export_failed">Could not save image</string>    <string name="update_failed">The Android installer could not open. / نصب‌کنندهٔ اندروید باز نشد.</string>
+</resources>

@@ -51,6 +51,22 @@
     "turbo": false
   },
   {
+    "id": "dreamshaper-8",
+    "family": "sd",
+    "fast": true,
+    "name": "DreamShaper 8",
+    "tier": "balanced",
+    "ram": 6,
+    "size": 512,
+    "steps": 16,
+    "quant": "q8_0",
+    "repo": "jmloperaa2830/tomi-dreamshaper8-q8-gguf",
+    "revision": "c6901f2ba75063f3d2fe7b6c56d258ab5fa701c3",
+    "file": "dreamshaper8_q8_0.gguf",
+    "bytes": 1801579904,
+    "sha256": "d54a11a31d3b4cb0fb75abdf01d8bca0305896dab30ed5088a940a19257c859a"
+  },
+  {
     "id": "xl-turbo",
     "family": "sdxl",
     "name": "SDXL Turbo",
@@ -96,9 +112,30 @@
     "quant": "q4_0",
     "repo": "leejet/FLUX.2-klein-4B-GGUF",
     "parts": [
-      {"role":"diffusion_model_path","repo":"leejet/FLUX.2-klein-4B-GGUF","revision":"3b1f5a9dc3abb32238b053aeb3d823c30afdacbd","file":"flux-2-klein-4b-Q4_0.gguf","bytes":2460378560,"sha256":"d1023499ef3f2f82ff7c50e6778495195c1b6cc34835741778868428111f9ff4"},
-      {"role":"llm_path","repo":"unsloth/Qwen3-4B-GGUF","revision":"22c9fc8a8c7700b76a1789366280a6a5a1ad1120","file":"Qwen3-4B-Q4_K_M.gguf","bytes":2497281312,"sha256":"f6f851777709861056efcdad3af01da38b31223a3ba26e61a4f8bf3a2195813a"},
-      {"role":"vae_path","repo":"Comfy-Org/Flux-2-Klein-4B","revision":"5b3abca5c0dc1ecd4eaf3340868d09063fc1c965","file":"split_files/vae/flux2-vae.safetensors","bytes":336211292,"sha256":"868fe7b343cc8f3a19dbcfcafbc3d5f888802be3f89bd81b65b3621a066ce8f3"}
+      {
+        "role": "diffusion_model_path",
+        "repo": "leejet/FLUX.2-klein-4B-GGUF",
+        "revision": "3b1f5a9dc3abb32238b053aeb3d823c30afdacbd",
+        "file": "flux-2-klein-4b-Q4_0.gguf",
+        "bytes": 2460378560,
+        "sha256": "d1023499ef3f2f82ff7c50e6778495195c1b6cc34835741778868428111f9ff4"
+      },
+      {
+        "role": "llm_path",
+        "repo": "unsloth/Qwen3-4B-GGUF",
+        "revision": "22c9fc8a8c7700b76a1789366280a6a5a1ad1120",
+        "file": "Qwen3-4B-Q4_K_M.gguf",
+        "bytes": 2497281312,
+        "sha256": "f6f851777709861056efcdad3af01da38b31223a3ba26e61a4f8bf3a2195813a"
+      },
+      {
+        "role": "vae_path",
+        "repo": "Comfy-Org/Flux-2-Klein-4B",
+        "revision": "5b3abca5c0dc1ecd4eaf3340868d09063fc1c965",
+        "file": "split_files/vae/flux2-vae.safetensors",
+        "bytes": 336211292,
+        "sha256": "868fe7b343cc8f3a19dbcfcafbc3d5f888802be3f89bd81b65b3621a066ce8f3"
+      }
     ]
   },
   {
@@ -113,9 +150,100 @@
     "quant": "q3_k",
     "repo": "leejet/Z-Image-Turbo-GGUF",
     "parts": [
-      {"role":"diffusion_model_path","repo":"leejet/Z-Image-Turbo-GGUF","revision":"c61c0e422dc8b541b7548cf33a4ef8302b0f8085","file":"z_image_turbo-Q3_K.gguf","bytes":3143559104,"sha256":"4b44bdaa7814f20d7cf144e3939bd93aa32f50660204dd0c2aea5c5376232980"},
-      {"role":"llm_path","repo":"unsloth/Qwen3-4B-Instruct-2507-GGUF","revision":"a06e946bb6b655725eafa393f4a9745d460374c9","file":"Qwen3-4B-Instruct-2507-Q4_K_M.gguf","bytes":2497281120,"sha256":"3605803b982cb64aead44f6c1b2ae36e3acdb41d8e46c8a94c6533bc4c67e597"},
-      {"role":"vae_path","repo":"Comfy-Org/Z-Image-Turbo","revision":"6fc90a3b1b653e935a0d175e260736de25b84df5","file":"split_files/vae/ae.safetensors","bytes":335304388,"sha256":"afc8e28272cd15db3919bacdb6918ce9c1ed22e96cb12c4d5ed0fba823529e38"}
+      {
+        "role": "diffusion_model_path",
+        "repo": "leejet/Z-Image-Turbo-GGUF",
+        "revision": "c61c0e422dc8b541b7548cf33a4ef8302b0f8085",
+        "file": "z_image_turbo-Q3_K.gguf",
+        "bytes": 3143559104,
+        "sha256": "4b44bdaa7814f20d7cf144e3939bd93aa32f50660204dd0c2aea5c5376232980"
+      },
+      {
+        "role": "llm_path",
+        "repo": "unsloth/Qwen3-4B-Instruct-2507-GGUF",
+        "revision": "a06e946bb6b655725eafa393f4a9745d460374c9",
+        "file": "Qwen3-4B-Instruct-2507-Q4_K_M.gguf",
+        "bytes": 2497281120,
+        "sha256": "3605803b982cb64aead44f6c1b2ae36e3acdb41d8e46c8a94c6533bc4c67e597"
+      },
+      {
+        "role": "vae_path",
+        "repo": "Comfy-Org/Z-Image-Turbo",
+        "revision": "6fc90a3b1b653e935a0d175e260736de25b84df5",
+        "file": "split_files/vae/ae.safetensors",
+        "bytes": 335304388,
+        "sha256": "afc8e28272cd15db3919bacdb6918ce9c1ed22e96cb12c4d5ed0fba823529e38"
+      }
     ]
+  },
+  {
+    "id": "qwen-05",
+    "task": "text",
+    "family": "qwen2.5",
+    "name": "Qwen2.5-0.5B-Instruct",
+    "tier": "light",
+    "ram": 3,
+    "quant": "q4_k_m",
+    "repo": "bartowski/Qwen2.5-0.5B-Instruct-GGUF",
+    "revision": "41ba88dbac95fed2528c92514c131d73eb5a174b",
+    "file": "Qwen2.5-0.5B-Instruct-Q4_K_M.gguf",
+    "bytes": 397808192,
+    "sha256": "6eb923e7d26e9cea28811e1a8e852009b21242fb157b26149d3b188f3a8c8653"
+  },
+  {
+    "id": "qwen-15",
+    "task": "text",
+    "family": "qwen2.5",
+    "name": "Qwen2.5-1.5B-Instruct",
+    "tier": "balanced",
+    "ram": 4,
+    "quant": "q4_k_m",
+    "repo": "bartowski/Qwen2.5-1.5B-Instruct-GGUF",
+    "revision": "9eadc66189c7641e1ddd226b8267a9119b2ce2d4",
+    "file": "Qwen2.5-1.5B-Instruct-Q4_K_M.gguf",
+    "bytes": 986048768,
+    "sha256": "1adf0b11065d8ad2e8123ea110d1ec956dab4ab038eab665614adba04b6c3370"
+  },
+  {
+    "id": "llama-1",
+    "task": "text",
+    "family": "llama",
+    "name": "Llama-3.2-1B-Instruct",
+    "tier": "balanced",
+    "ram": 4,
+    "quant": "q4_k_m",
+    "repo": "bartowski/Llama-3.2-1B-Instruct-GGUF",
+    "revision": "067b946cf014b7c697f3654f621d577a3e3afd1c",
+    "file": "Llama-3.2-1B-Instruct-Q4_K_M.gguf",
+    "bytes": 807694464,
+    "sha256": "6f85a640a97cf2bf5b8e764087b1e83da0fdb51d7c9fab7d0fece9385611df83"
+  },
+  {
+    "id": "smollm2-360",
+    "task": "text",
+    "family": "smollm2",
+    "name": "SmolLM2 360M Instruct",
+    "tier": "light",
+    "ram": 3,
+    "quant": "q4_k_m",
+    "repo": "bartowski/SmolLM2-360M-Instruct-GGUF",
+    "revision": "7be6f65f1db715fe5dc5a4634c0d459b4eed42ec",
+    "file": "SmolLM2-360M-Instruct-Q4_K_M.gguf",
+    "bytes": 270590880,
+    "sha256": "2fa3f013dcdd7b99f9b237717fa0b12d75bbb89984cc1274be1471a465bac9c2"
+  },
+  {
+    "id": "gemma3-1",
+    "task": "text",
+    "family": "gemma3",
+    "name": "Gemma 3 1B IT",
+    "tier": "balanced",
+    "ram": 4,
+    "quant": "q4_k_m",
+    "repo": "ggml-org/gemma-3-1b-it-GGUF",
+    "revision": "f9c28bcd85737ffc5aef028638d3341d49869c27",
+    "file": "gemma-3-1b-it-Q4_K_M.gguf",
+    "bytes": 806058240,
+    "sha256": "8ccc5cd1f1b3602548715ae25a66ed73fd5dc68a210412eea643eb20eb75a135"
   }
 ]

@@ -48,6 +48,9 @@ final class Studio {
     private Runnable listener;
     private String gpu = "";
     private String selected;
+    private String selectedText;
+    private JSONObject chat = new JSONObject();
+    private String chatAnswer;
     private String preferred;
     private String runningMode = "cpu";
     private int request;
@@ -88,6 +91,7 @@ final class Studio {
             initError = "catalog";
         }
         selected = context.getSharedPreferences("studio", 0).getString("selected", "");
+        selectedText = context.getSharedPreferences("studio", 0).getString("selectedText", "");
         preferred = context.getSharedPreferences("studio", 0).getString("engine", "auto");
         work.execute(() -> {
             // An interrupted native write is never treated as an image.
@@ -114,6 +118,7 @@ final class Studio {
     }
 
     void listen(Runnable callback) { listener = callback; }
+    void updateChanged() { main.post(this::changed); }
     boolean generating() { return generating; }
     private void changed() { if (listener != null) listener.run(); }
 
@@ -140,7 +145,8 @@ final class Studio {
                 entries.put(entry);
             } catch (Exception error) { Log.e("Nocturne", "Catalog entry unavailable", error); }
         }
-        JSONObject state = json("models", entries, "selected", selected, "photos", photos,
+        JSONObject state = json("models", entries, "selected", selected, "photos", photos, "selectedText", selectedText, "chat", chat,
+                "appUpdate", AppUpdates.get(context).state(),
                 "download", download, "generation", generation, "generating", generating,
                 "downloading", downloading, "initError", initError, "preferred", preferred,
                 "gpuAvailable", gpuAvailable, "galleryReady", galleryReady, "generationStarted", generationStarted);
@@ -152,8 +158,10 @@ final class Studio {
     void select(String id) {
         var model = catalog.get(id);
         if (generating || model == null || !model.installed(models)) return;
-        selected = id;
-        context.getSharedPreferences("studio", 0).edit().putString("selected", selected).apply();
+        if (model.text()) selectedText = id;
+        else selected = id;
+        context.getSharedPreferences("studio", 0).edit()
+                .putString(model.text() ? "selectedText" : "selected", id).apply();
         changed();
     }
 
@@ -200,7 +208,7 @@ final class Studio {
                 activeDownload = "";
                 download = json("id", id, "phase", installed ? "ready" : control.paused() ? "paused" : "error",
                         "received", model.received(models), "error", error);
-                if (installed && selected.isEmpty()) select(id);
+                if (installed && (model.text() ? selectedText : selected).isEmpty()) select(id);
                 changed();
             });
         });
@@ -220,6 +228,10 @@ final class Studio {
             for (Model.Asset asset : model.assets()) {
                 Files.deleteIfExists(asset.ready(models).toPath());
                 Files.deleteIfExists(asset.partial(models).toPath());
+            }
+            if (selectedText.equals(id)) {
+                selectedText = "";
+                context.getSharedPreferences("studio", 0).edit().remove("selectedText").apply();
             }
             if (selected.equals(id)) {
                 selected = "";
@@ -270,6 +282,35 @@ final class Studio {
         startEngine(mode);
     }
 
+    void chat(String prompt) {
+        if (generating || prompt == null || prompt.trim().isEmpty() || prompt.length() > 1500) return;
+        Model model = catalog.get(selectedText);
+        if (model == null || !model.installed(models)) {
+            chat = json("error", "model", "prompt", prompt);
+            changed();
+            return;
+        }
+        var memory = Hardware.memory(context);
+        if (memory.lowMemory || !Hardware.fits(memory.totalMem, model.ram()) || memory.availMem < 768L * 1024 * 1024) {
+            chat = json("error", "memory", "prompt", prompt);
+            changed();
+            return;
+        }
+        output = null;
+        chatAnswer = null;
+        chat = json("prompt", prompt.trim(), "working", true);
+        metadata = json("modelId", model.id());
+        generating = true;
+        generationStarted = System.currentTimeMillis();
+        cancelling = false;
+        usingFallback = false;
+        pending = new Bundle();
+        pending.putBundle("components", model.paths(models));
+        pending.putString("prompt", prompt.trim());
+        pending.putInt("threads", Math.max(1, Math.min(6, Runtime.getRuntime().availableProcessors() - 1)));
+        startEngine("text");
+    }
+
     private Bundle pending;
     private ServiceConnection connection;
 
@@ -278,7 +319,7 @@ final class Studio {
     private void startEngine(String mode) {
         runningMode = mode;
         pending.putString("mode", mode);
-        generation = json("phase", usingFallback ? "fallback" : "loading", "mode", mode);
+        if (!"text".equals(mode)) generation = json("phase", usingFallback ? "fallback" : "loading", "mode", mode);
         changed();
         final int thisRequest = ++request;
         connection = new ServiceConnection() {
@@ -302,7 +343,8 @@ final class Studio {
                 if (connection == this && generating) finishOrRetry(false, false, "engine");
             }
         };
-        Class<?> service = usesGpu(mode) ? VulkanEngineService.class : EngineService.class;
+        Class<?> service = "text".equals(mode) ? TextEngineService.class :
+                usesGpu(mode) ? VulkanEngineService.class : EngineService.class;
         try { bound = context.bindService(new Intent(context, service), connection, Context.BIND_AUTO_CREATE); }
         catch (SecurityException error) { bound = false; }
         if (!bound) finishOrRetry(false, false, "engine");
@@ -320,7 +362,7 @@ final class Studio {
 
     private void finishOrRetry(boolean success, boolean cancelled, String error) {
         if (!generating) return;
-        if (!success && !cancelled && !cancelling && !usingFallback && !"cpu".equals(runningMode)) {
+        if (!success && !cancelled && !cancelling && !usingFallback && !"text".equals(runningMode) && !"cpu".equals(runningMode)) {
             Log.w("Nocturne", runningMode + " failed. Retrying on CPU: " + error);
             if (usesGpu(runningMode)) gpuFailures.add(metadata.optString("modelId"));
             usingFallback = true;
@@ -341,6 +383,7 @@ final class Studio {
             changed();
         }
         if (message.what == EngineService.RESULT) {
+            if ("text".equals(runningMode)) chatAnswer = data.getString("answer");
             finishOrRetry(data.getBoolean("ok"), data.getBoolean("cancelled"), data.getString("error", "engine"));
         }
         return true;
@@ -349,7 +392,7 @@ final class Studio {
     void stop() {
         if (!generating || cancelling) return;
         cancelling = true;
-        generation = json("phase", "stopping");
+        if (!"text".equals(runningMode)) generation = json("phase", "stopping");
         changed();
         if (engine == null) { finish(false, true, ""); return; }
         try { engine.send(Message.obtain(null, EngineService.CANCEL, request, 0)); }
@@ -361,6 +404,13 @@ final class Studio {
         generating = false;
         disconnect();
         pending = null;
+        if ("text".equals(runningMode)) {
+            String prompt = chat.optString("prompt");
+            chat = success ? json("prompt", prompt, "answer", chatAnswer)
+                    : json("prompt", prompt, "error", cancelled ? "cancelled" : "engine");
+            changed();
+            return;
+        }
         if (success) {
             try { metadata.put("engine", runningMode); }
             catch (org.json.JSONException errorInfo) { Log.w("Nocturne", "Could not save engine details", errorInfo); }

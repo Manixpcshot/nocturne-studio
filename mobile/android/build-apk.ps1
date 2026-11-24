@@ -2,6 +2,7 @@ param(
     [Parameter(Mandatory)][string]$Sdk,
     [string]$EngineDir = (Join-Path $PSScriptRoot 'vendor/stable-diffusion.cpp'),
     [string]$Output = (Join-Path $PSScriptRoot 'build/Nocturne-Mobile.apk'),
+    [string]$LlamaDir = (Join-Path $PSScriptRoot 'vendor/llama.cpp'),
     [string]$NativeBuild,
     [string]$BuildDirectory,
     [string]$VulkanBuild,
@@ -91,11 +92,32 @@ if ($VulkanHeaders -or $SpirvConfig) {
     Remove-Item -LiteralPath "$lib/libnocturne_vulkan.so"
 }
 
+$llamaPin = '2da668617612d2df773f966e3b0ee22dc2beef7b'
+if (!(Test-Path (Join-Path $LlamaDir '.git'))) {
+    New-Item -ItemType Directory -Force (Split-Path $LlamaDir) | Out-Null
+    Invoke-Checked git @('init', $LlamaDir)
+    Invoke-Checked git @('-C', $LlamaDir, 'remote', 'add', 'origin', 'https://github.com/ggml-org/llama.cpp.git')
+    Invoke-Checked git @('-C', $LlamaDir, 'fetch', '--depth', '1', 'origin', $llamaPin)
+    Invoke-Checked git @('-C', $LlamaDir, 'checkout', '--detach', $llamaPin)
+}
+$actualLlamaPin = & git -C $LlamaDir rev-parse HEAD
+if ($LASTEXITCODE -or $actualLlamaPin -ne $llamaPin) { throw "The text engine checkout must be at $llamaPin." }
+$LlamaDir = (Resolve-Path $LlamaDir).Path
+$chatNative = Join-Path $scratch 'chat'
+Invoke-Checked "$cmakeBin/cmake.exe" @('-S',"$app/chat-cpp",'-B',$chatNative,'-G','Ninja',
+    "-DCMAKE_MAKE_PROGRAM=$cmakeBin/ninja.exe","-DCMAKE_TOOLCHAIN_FILE=$ndk/build/cmake/android.toolchain.cmake",
+    "-DANDROID_ABI=$Abi",'-DANDROID_PLATFORM=android-28','-DANDROID_STL=c++_static',
+    '-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON',"-DNOCTURNE_LLAMA=$LlamaDir",'-DCMAKE_BUILD_TYPE=Release')
+Invoke-Checked "$cmakeBin/cmake.exe" @('--build',$chatNative,'--target','nocturne_chat','--parallel',"$Jobs")
+Copy-Item -LiteralPath "$chatNative/libnocturne_chat.so" -Destination "$lib/libnocturne_chat.so" -Force
+Invoke-Checked "$llvm/llvm-strip.exe" @('--strip-unneeded',"$lib/libnocturne_chat.so")
+
 Invoke-Checked "$tools/aapt2.exe" @('compile','--dir',"$app/res",'-o',$resources)
-Invoke-Checked "$tools/aapt2.exe" @('link','-I',$platform,'--manifest',"$app/AndroidManifest.xml",
+$linkArgs = @('link','-I',$platform,'--manifest',"$app/AndroidManifest.xml",
     '--java',$generated,'-A',"$app/assets",'--min-sdk-version','28','--target-sdk-version','35',
-    '--version-name',$versionName,'--version-code',$versionCode,'--rename-manifest-package','studio.nocturne.mobile',
-    '--debug-mode','-o',$base,$resources)
+    '--version-name',$versionName,'--version-code',$versionCode,'--rename-manifest-package','studio.nocturne.mobile')
+if (!$SigningKey) { $linkArgs += '--debug-mode' }
+Invoke-Checked "$tools/aapt2.exe" ($linkArgs + @('-o',$base,$resources))
 $javaSources = @(Get-ChildItem -Path $projectJava,$generated -Filter '*.java' -Recurse | Select-Object -ExpandProperty FullName)
 Invoke-Checked $javac (@('-encoding','UTF-8','--release','11','-classpath',$platform,'-d',$classes) + $javaSources)
 $archive = Join-Path $scratch 'classes.jar'

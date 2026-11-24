@@ -147,7 +147,7 @@ progress:not([value])::-webkit-progress-bar { background: transparent; }
 .engine-copy strong, .engine-copy small { display: block; }
 .engine-copy strong { font-size: 13px; }
 .engine-copy small { color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
-.nav { position: sticky; bottom: 0; border-top: 1px solid var(--edge); display: grid; grid-template-columns: repeat(4,minmax(0,1fr)); padding: 5px max(8px, calc((100% - 674px) / 2)); }
+.nav { position: sticky; bottom: 0; border-top: 1px solid var(--edge); display: grid; grid-template-columns: repeat(5,minmax(0,1fr)); padding: 5px max(8px, calc((100% - 674px) / 2)); }
 .nav button { display: grid; justify-items: center; align-content: center; gap: 3px; border: 0; background: none; color: var(--muted); font-size: 11px; padding: 5px 2px; min-height: 53px; border-radius: 11px; }
 .nav button[aria-current="page"] { background: #2d2931; color: var(--accent); }
 dialog { color: var(--text); background: var(--card); border: 1px solid var(--edge); border-radius: 20px; padding: 14px; width: min(96%, 620px); max-height: 90vh; }
@@ -200,3 +200,13 @@ body { display: grid; min-height: 0; grid-template: "top" auto "activity" auto "
   .list, .engine-list { grid-template-columns: repeat(2,minmax(0,1fr)); }
 }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: .001s !important; transition-duration: .001s !important; } }
+
+.activity-rows { grid-area: activity; min-width: 0; }
+.update-line, .chat-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; justify-content: space-between; }
+#update-alert .update-line { padding: 6px 10px; width: 100%; }
+#update-card progress { display: block; width: 100%; margin-block: 10px 4px; }
+#chat-picker, #chat-prompt { margin-block: 8px; }
+#chat-picker select { width: 100%; }
+.chat-message { white-space: pre-wrap; overflow-wrap: anywhere; padding: 10px 13px; border: 1px solid var(--edge); border-radius: 12px; }
+.chat-message.user { background: var(--ink); }
+.chat-actions { justify-content: flex-end; }

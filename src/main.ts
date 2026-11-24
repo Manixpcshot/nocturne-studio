@@ -2345,6 +2345,8 @@ async function boot() {
   try {
     render();
     rendered = true;
+    try { await invoke("install_app_update"); }
+    catch (error) { console.warn("App update could not be installed", error); }
     await initialize();
     hideStartup();
     downloadsReady = true;

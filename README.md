@@ -4,7 +4,7 @@ Nocturne Studio is a Windows desktop app for generating images, video and speech
 
 [Download the Windows release](https://github.com/Manixpcshot/nocturne-studio/releases/latest) · [راهنمای فارسی](README.fa.md)
 
-The Android edition generates images on the phone and recommends models based on available hardware. [Download for Android](https://github.com/Manixpcshot/nocturne-studio/releases/latest) · [Android guide](mobile/android/README.md)
+The Android edition generates images and runs text models on the phone and recommends models based on available hardware. [Download for Android](https://github.com/Manixpcshot/nocturne-studio/releases/latest) · [Android guide](mobile/android/README.md)
 
 ![Nocturne Studio 2.0 home with shortcuts to each workspace](docs/screenshots/home.png)
 
@@ -54,6 +54,10 @@ Model files are downloaded separately. The memory and disk space required depend
 
 ![Settings in Persian with the language selector visible](docs/screenshots/settings-fa.png)
 
+## App updates
+
+Install a current release manually once to enable updates. The installed Windows version checks GitHub at startup and verifies the installer signature before handing off to setup. Portable Windows copies are updated by replacing the extracted ZIP. On Android, the app downloads a newer signed APK when opened and prompts you to confirm installation.
+
 ## Build from source
 
 Use a Windows x64 development environment with Node.js, Rust, Python 3.13, WebView2 and the MSVC C++ build tools. In the project root, run:
@@ -63,7 +67,7 @@ npm ci
 npm run tauri dev
 ```
 
-Run `npm run tauri build` for a release installer. The NSIS installer is generated in `src-tauri/target/release/bundle/nsis`.
+Set `TAURI_SIGNING_PRIVATE_KEY` to a Tauri signing key and run `npm run tauri build` for a release installer. Locally distributed builds need a matching public key and update endpoint. The NSIS installer is generated in `src-tauri/target/release/bundle/nsis`.
 
 GitHub Actions builds the Windows installer, portable ZIP, and signed ARM64 Android APK together when a `v*` release tag is pushed. The tag matches the Windows version in `package.json`. Increase Android's `versionCode` and set its `versionName` in `mobile/android/app/build.gradle` when shipping an Android update. The release is published after all builds and regression tests pass.
 

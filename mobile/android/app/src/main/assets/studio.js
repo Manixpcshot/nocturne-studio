@@ -1,13 +1,27 @@
 "use strict";
 
 const text = {
+  chat: ["Chat", "چت"], text: ["Text", "متن"], imageModels: ["Image", "تصویر"],
+  chatIntro: ["Generate text offline with llama.cpp on your CPU.", "با موتور llama.cpp روی پردازندهٔ گوشی، آفلاین متن بساز."],
+  textModel: ["Text model", "مدل متنی"], chatPrompt: ["Write a message…", "پیام را بنویس…"],
+  addText: ["Find a text model", "پیدا کردن مدل متنی"], send: ["Send", "ارسال"],
+  chatCancelled: ["Response stopped.", "پاسخ متوقف شد."],
+  answering: ["Generating an answer…", "در حال نوشتن پاسخ…"],
+  textFailed: ["The text engine could not answer. Try a shorter message.", "موتور متن نتوانست پاسخ بسازد. پیام کوتاه‌تری امتحان کن."],
+  appUpdates: ["App updates", "به‌روزرسانی برنامه"], checkUpdate: ["Check for updates", "بررسی به‌روزرسانی"],
+  update_checking: ["Checking GitHub…", "در حال بررسی گیت‌هاب…"],
+  update_current: ["You're up to date.", "آخرین نسخه نصب است."],
+  update_downloading: ["Downloading the app update", "در حال دانلود نسخهٔ تازه"],
+  update_ready: ["Update ready to install", "نسخهٔ تازه آمادهٔ نصب است"],
+  update_error: ["The update couldn't be checked or downloaded. Try again.", "بررسی یا دانلود نسخه انجام نشد. دوباره امتحان کن."],
+  installUpdate: ["Install update", "نصب به‌روزرسانی"],
+  modelIntro: ["Choose an image or text model for your phone.", "برای گوشی‌ات مدل تصویر یا متن انتخاب کن."],
   studio: ["Studio", "استودیو"], models: ["Models", "مدل‌ها"], gallery: ["Gallery", "گالری"], device: ["Device", "گوشی"],
   local: ["On-device generation", "تولید روی گوشی"], hero: ["Image studio", "استودیوی تصویر"],
   heroBody: ["Create on your phone, even offline.", "مستقیم روی گوشی، حتی آفلاین."],
   prompt: ["Prompt", "پرامپت"], promptHint: ["Describe the image you want…", "تصویری را که می‌خواهی توصیف کن…"],
   clearPrompt: ["Clear", "پاک‌کردن"],
   example: ["Try a prompt", "پرامپت نمونه"], offlineNote: ["Once a model is installed, you can create without internet.", "بعد از نصب مدل، بدون اینترنت هم می‌توانی عکس بسازی."],
-  modelIntro: ["Choose an image model for your phone.", "مدل تصویرساز متناسب با گوشی را انتخاب کن."],
   modelEstimate: ["RAM recommendations are estimates. Speed depends on the processor and available memory.", "رده‌ها برآوردی بر اساس رم هستند. سرعت به پردازنده و رم آزاد بستگی دارد."],
   deviceIntro: ["Hardware and capacity reported by Android.", "مشخصات سخت‌افزار و ظرفیت گزارش‌شده توسط اندروید."],
   refresh: ["Refresh", "به‌روزرسانی"], preview: ["Image preview", "نمایش تصویر"], close: ["Close", "بستن"],
@@ -73,6 +87,7 @@ const text = {
 };
 
 const icons = {
+  chat: '<path d="M20 11a8 8 0 0 1-8 8H7l-4 2 1.5-5A8 8 0 1 1 20 11Z"/>',
   studio: '<path d="M9 3 7 9 1 11l6 2 2 6 2-6 6-2-6-2-2-6ZM19 12v8m-4-4h8M17 2v4m-2-2h4"/>',
   models: '<path d="m12 3 9 5-9 5-9-5 9-5Zm-9 9 9 5 9-5M3 16l9 5 9-5"/>',
   gallery: '<rect x="3" y="3" width="18" height="18" rx="3"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="m4 17 5-5 3 3 4-4 5 5"/>',
@@ -88,8 +103,8 @@ const icons = {
 };
 
 const $ = (id) => document.getElementById(id);
-const tabs = ["studio", "models", "gallery", "device"];
-const filters = ["all", "installed", "light", "balanced", "power"];
+const tabs = ["studio", "chat", "models", "gallery", "device"];
+const filters = ["all", "imageModels", "text", "installed", "light", "balanced", "power"];
 const engines = ["auto", "vulkan", "hybrid", "cpu", "fast"];
 const button = (action, label, style = "outline", data = "", icon = "", disabled = false, aria = "remove") =>
   '<button class="' + style + '" data-action="' + action + '" data-value="' + esc(data) + '"' + (disabled ? " disabled" : "") +
@@ -164,6 +179,8 @@ function drawNav() {
 
 function drawActive() {
   drawActivity();
+  drawAppUpdates();
+  if (view === "chat") drawChat();
   if (view === "studio") drawStudio();
   if (view === "models") drawModels();
   if (view === "gallery") drawGallery();
@@ -197,7 +214,7 @@ function drawActivity() {
   const item = data.download;
   const currentDownload = data.models.find((model) => model.id === item.id);
   const showDownload = view !== "models" && currentDownload && (data.downloading || item.phase === "paused");
-  const showGeneration = view !== "studio" && data.generating;
+  const showGeneration = view !== "studio" && data.generating && !data.chat?.working;
   $("activity-strip").hidden = !showDownload && !showGeneration;
   replace("activity-strip", (showDownload ? '<button class="activity-item" data-action="tab" data-value="models">' +
     glyph("download") + '<span id="activity-download"></span></button>' : "") +
@@ -242,7 +259,7 @@ function drawStudio() {
     });
   }
 
-  const installed = data.models.filter((model) => model.installed);
+  const installed = data.models.filter((model) => model.installed && model.task !== "text");
   const current = installed.find((model) => model.id === data.selected);
   replace("model-picker", installed.length ? '<select id="model-select" aria-label="' + esc(t("chooseModel")) + '"' +
     (data.generating ? " disabled" : "") + '><option value="" disabled' + (current ? "" : " selected") + ">" + esc(t("chooseModel")) +
@@ -292,7 +309,7 @@ function modelTransfer(model) {
 }
 
 function drawModels() {
-  const fits = data.models.filter((model) => model.fits);
+  const fits = data.models.filter((model) => model.fits && (filter === "text" ? model.task === "text" : model.task !== "text"));
   const hardwareTier = data.hardware.tier;
   const first = fits.find((model) => model.tier === hardwareTier) || fits[fits.length - 1];
   replace("recommendation", '<div class="banner"><span class="tile-icon">' + glyph("chip") + "</span><div><strong>" +
@@ -300,11 +317,13 @@ function drawModels() {
   replace("model-filters", filters.map((name) => '<button class="filter" data-action="filter" data-value="' + name +
     '" aria-pressed="' + (filter === name) + '">' + t(name) + "</button>").join(""));
   const models = data.models.filter((model) =>
-    (filter === "all" || (filter === "installed" ? model.installed : model.tier === filter)) &&
+    (filter === "all" || (filter === "installed" && model.installed) ||
+      (filter === "text" && model.task === "text") || (filter === "imageModels" && model.task !== "text") ||
+      model.tier === filter) &&
     (!query || (model.name + " " + (model.repo || "")).toLowerCase().includes(query)));
   const cards = models.map((model) => {
     const active = data.downloading && data.download.id === model.id;
-    const current = data.selected === model.id && model.installed;
+    const current = (model.task === "text" ? data.selectedText : data.selected) === model.id && model.installed;
     const short = model.spaceOk === false && !model.installed;
     const badge = current ? "selected" : model.installed ? "installed" : !model.fits ? "ramShort" : short ? "diskShort" : "fits";
     const action = active ? "" :
@@ -314,7 +333,7 @@ function drawModels() {
       ? button("removeModel", "", "icon-button danger", model.id, "remove", data.generating && current) : "";
     return '<article class="model' + (current ? " selected" : "") + '"><div class="model-header"><span class="tile-icon">' +
       glyph("models") + "</span><div><h2><bdi>" + esc(model.name) + '</bdi></h2><p class="meta"><bdi>' +
-      esc(model.quant.toUpperCase()) + " · " + bytes(model.bytes, true) + " · " + number(model.size) + "²</bdi></p>" +
+      esc(model.quant.toUpperCase()) + " · " + bytes(model.bytes, true) + " · " + (model.task === "text" ? "llama.cpp" : number(model.size) + "²") + "</bdi></p>" +
       '<p class="meta">' + esc(t(model.tier)) + " · " + number(model.ram) + " " + esc(t("ramRecommendation")) +
       (model.components > 1 ? " · " + number(model.components) + " " + t("components") : "") + "</p>" +
       (short ? '<p class="meta">' + bytes(model.requiredSpace, true) + " " + t("needsFree") + "</p>" : "") + "</div></div>" +
@@ -351,6 +370,48 @@ function drawGallery() {
     '</bdi></span>' + (photo.model ? '<span class="photo-model"><bdi>' + esc(photo.model) + '</bdi></span>' : '') + "</button>").join("") +
     '</div>' : data.galleryReady === false ? "" : '<div class="empty">' + glyph("gallery") + "<p>" + t(photoQuery ? "noPhotos" : "empty") + "</p>" +
     (photoQuery ? "" : button("tab", "studio", "outline", "studio")) + "</div>");
+}
+
+function drawAppUpdates() {
+  const update = data.appUpdate || {};
+  const phase = update.phase;
+  const install = button("installUpdate", "installUpdate", "primary", "", "download", data.generating);
+  const version = update.version ? " · <bdi>" + esc(update.version) + "</bdi>" : "";
+  $("update-alert").hidden = phase !== "ready";
+  replace("update-alert", phase === "ready" ? '<div class="update-line"><span>' + t("update_ready") + version + "</span>" + install + "</div>" : "");
+  if (view !== "device") return;
+  const progress = phase === "downloading" && update.total > 0
+    ? '<progress max="' + Number(update.total) + '" value="' + Number(update.received) + '"></progress><bdi>' +
+      bytes(update.received, true) + " / " + bytes(update.total, true) + "</bdi>" : "";
+  replace("update-card", '<div class="update-line"><span>' + (phase ? t("update_" + phase) : "") + version + "</span>" +
+    (phase === "ready" ? install : button("checkUpdate", "checkUpdate", "outline", "", "", phase === "checking" || phase === "downloading")) +
+    "</div>" + progress);
+}
+
+function drawChat() {
+  const modelList = data.models.filter((item) => item.task === "text" && item.installed);
+  const result = data.chat || {};
+  const current = modelList.some((item) => item.id === data.selectedText);
+  replace("chat-picker", modelList.length ? '<select id="chat-select" dir="auto"' +
+    (data.generating ? " disabled" : "") + ">" +
+    (current ? "" : '<option value="" disabled selected>' + t("textModel") + "</option>") +
+    modelList.map((item) => '<option value="' + esc(item.id) + '"' + (data.selectedText === item.id ? " selected" : "") +
+      ">" + esc(item.name) + "</option>").join("") + "</select>" : button("findText", "addText", "outline"));
+  const message = result.prompt ? '<p class="chat-message user" dir="auto">' + esc(result.prompt) + "</p>" : "";
+  const body = result.working ? t("answering") : result.answer ? esc(result.answer) : result.error ? t(({engine: "textFailed", model: "addText", cancelled: "chatCancelled"})[result.error] || result.error) : "";
+  replace("chat-result", message + (body ? '<p class="chat-message" dir="auto">' + body + "</p>" : ""));
+  replace("chat-actions", result.working ? button("stop", "stop", "outline danger") :
+    button("chatSend", "send", "primary", "", "chat", !current || data.generating || !$("chat-prompt").value.trim()));
+}
+
+function sendChat() {
+  const field = $("chat-prompt");
+  const prompt = field.value.trim();
+  if (!prompt || data.generating || !data.selectedText || !bridge) return;
+  bridge.chat(prompt);
+  field.value = "";
+  field.blur();
+  drawChat();
 }
 
 function drawHardware() {
@@ -465,7 +526,11 @@ document.addEventListener("click", (event) => {
     case "refresh": bridge?.refresh(); break;
     case "download": bridge?.download(value); break;
     case "pause": bridge?.pauseDownload(); break;
-    case "select": bridge?.select(value); switchView("studio"); break;
+    case "select": bridge?.select(value); switchView(data.models.some((item) => item.id === value && item.task === "text") ? "chat" : "studio"); break;
+    case "findText": filter = "text"; switchView("models"); break;
+    case "chatSend": sendChat(); break;
+    case "checkUpdate": bridge?.checkUpdate(); break;
+    case "installUpdate": bridge?.installUpdate(); break;
     case "engine": bridge?.engine(value); break;
     case "generate": bridge?.generate($("prompt").value.trim()); $("prompt").blur(); break;
     case "stop": bridge?.stop(); break;
@@ -481,6 +546,7 @@ document.addEventListener("click", (event) => {
   }
 });
 document.addEventListener("change", (event) => {
+  if (event.target.id === "chat-select") bridge?.select(event.target.value);
   if (event.target.id === "model-select") bridge?.select(event.target.value);
   if (event.target.id === "engine-select" && !engineUnavailable(event.target.value)) bridge?.engine(event.target.value);
 });
@@ -493,6 +559,13 @@ $("gallery-query").addEventListener("input", (event) => {
   drawGallery();
 });
 $("prompt").addEventListener("input", () => updatePromptControls(true));
+$("chat-prompt").addEventListener("input", drawChat);
+$("chat-prompt").addEventListener("keydown", (event) => {
+  if (event.key === "Enter" && (event.ctrlKey || event.metaKey) && !event.isComposing) {
+    event.preventDefault();
+    sendChat();
+  }
+});
 $("viewer").addEventListener("keydown", (event) => {
   if ($("confirm").open || zoom > 1 || !["ArrowLeft", "ArrowRight"].includes(event.key)) return;
   event.preventDefault();

@@ -41,6 +41,7 @@ public final class MainActivity extends Activity {
     private WebView web;
     private Studio studio;
     private String pendingExport;
+    private boolean waitingForInstallPermission;
     private boolean renderQueued, keyboardVisible;
     private final Runnable update = this::render;
 
@@ -48,7 +49,10 @@ public final class MainActivity extends Activity {
         super.onCreate(saved);
         if (Build.VERSION.SDK_INT >= 30) getWindow().setDecorFitsSystemWindows(false);
         studio = Studio.get(this);
-        if (saved != null) pendingExport = saved.getString("export");
+        if (saved != null) {
+            pendingExport = saved.getString("export");
+            waitingForInstallPermission = saved.getBoolean("installPermission");
+        }
         getWindow().setStatusBarColor(Color.rgb(10, 16, 27));
         getWindow().setNavigationBarColor(Color.rgb(10, 16, 27));
         web = new WebView(this);
@@ -121,6 +125,11 @@ public final class MainActivity extends Activity {
         super.onResume();
         studio.listen(update);
         render();
+        AppUpdates.get(this).check(false, studio::updateChanged);
+        if (waitingForInstallPermission) {
+            waitingForInstallPermission = false;
+            if (getPackageManager().canRequestPackageInstalls()) installUpdate();
+        }
     }
 
     @Override public void onPause() {
@@ -151,6 +160,7 @@ public final class MainActivity extends Activity {
     @Override protected void onSaveInstanceState(Bundle out) {
         super.onSaveInstanceState(out);
         out.putString("export", pendingExport);
+        out.putBoolean("installPermission", waitingForInstallPermission);
     }
 
     @Override protected void onDestroy() {
@@ -199,7 +209,31 @@ public final class MainActivity extends Activity {
         else if (!success) Toast.makeText(this, R.string.export_failed, Toast.LENGTH_SHORT).show();
     }
 
+    private void installUpdate() {
+        if (AppUpdates.get(this).ready() == null || studio.generating()) return;
+        try {
+            if (!getPackageManager().canRequestPackageInstalls()) {
+                waitingForInstallPermission = true;
+                startActivity(new Intent(android.provider.Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                        Uri.parse("package:" + getPackageName())));
+                return;
+            }
+            startActivity(new Intent(Intent.ACTION_VIEW)
+                    .setDataAndType(Uri.parse("content://studio.nocturne.mobile.updates/installer.apk"),
+                            "application/vnd.android.package-archive")
+                    .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION));
+        } catch (android.content.ActivityNotFoundException | SecurityException error) {
+            waitingForInstallPermission = false;
+            Toast.makeText(this, R.string.update_failed, Toast.LENGTH_LONG).show();
+        }
+    }
+
     private final class Bridge {
+        @JavascriptInterface public void checkUpdate() {
+            AppUpdates.get(MainActivity.this).check(true, studio::updateChanged);
+        }
+        @JavascriptInterface public void installUpdate() { runOnUiThread(MainActivity.this::installUpdate); }
+        @JavascriptInterface public void chat(String prompt) { runOnUiThread(() -> studio.chat(prompt)); }
         @JavascriptInterface public void refresh() {
             runOnUiThread(MainActivity.this::render);
         }

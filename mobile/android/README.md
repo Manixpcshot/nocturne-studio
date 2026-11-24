@@ -1,6 +1,6 @@
 # Nocturne Studio Mobile
 
-Android edition of Nocturne Studio for text-to-image on the phone. The app needs internet to download model weights. Image generation, prompts, and the gallery work locally after installation. Images can be exported as PNG through the system file picker.
+Android edition of Nocturne Studio for on-device images and text. Open Models to install a model, then open Studio for images or Chat for text. The app needs internet to download model weights. Image generation, prompts, and the gallery work locally after installation. Images can be exported as PNG through the system file picker.
 
 [Download Nocturne Mobile](https://github.com/Manixpcshot/nocturne-studio/releases/latest)
 
@@ -19,21 +19,27 @@ Android edition of Nocturne Studio for text-to-image on the phone. The app needs
 | Tier | Packaged model choices | Approx. download | Output |
 | --- | --- | --- | --- |
 | Weak, 4 GB RAM | SD Turbo Lite Q4 | 1.85 GB | 384 × 384 |
-| Medium, 6 GB RAM | SD Turbo Q8, Stable Diffusion 1.5 Q4 | 2.15–3.05 GB | 512 × 512 |
+| Medium, 6 GB RAM | DreamShaper 8 Q8, SD Turbo Q8, Stable Diffusion 1.5 Q4 | 1.80–3.05 GB | 512 × 512 |
 | Strong, 8–12 GB RAM | SDXL Turbo Q4 and HQ Q8 | 3.94–5.04 GB | 512 × 512 |
 | Strong, 12 GB RAM | FLUX.2 Klein 4B Q4, Z-Image Turbo Q3 | 5.29–5.98 GB | 512 × 512 |
 
 Model checkpoints download separately. Downloads use pinned Hugging Face revisions, preserve partial files for resume and verify the size and SHA-256 of each part before making a model selectable. The two multipart models include their text encoder and autoencoder in the listed download size. The catalog lists source repositories in [models.json](app/src/main/assets/models.json). Each model is subject to the terms shown in its source repository.
 
+## Text and app updates
+
+Chat runs GGUF text models on the CPU through llama.cpp. SmolLM2 360M and Qwen2.5 0.5B are the smaller options. Qwen2.5 1.5B, Gemma 3 1B and Llama 3.2 1B need more memory. Image processing uses stable-diffusion.cpp with CPU and supported Vulkan modes.
+
+Once this version is installed, the app checks GitHub while opening and downloads a newer APK with release metadata. Verify status or retry under **Device → App updates**. Android asks permission for installations from the app and asks you to confirm the APK installation.
+
 ## Build from source
 
-SDK packages are Android SDK Platform 35, Build Tools 35.0.0, NDK 27.2.12479018 and CMake 3.31.6. Install JDK 17 or 21 and Git. On Windows, the script prepares the pinned engine and only the ggml submodule, builds the native library and signs a development APK.
+SDK packages are Android SDK Platform 35, Build Tools 35.0.0, NDK 27.2.12479018 and CMake 3.31.6. Install JDK 17 or 21 and Git. On Windows, the script prepares pinned stable-diffusion.cpp and llama.cpp, builds both native libraries and signs a development APK.
 
 ```powershell
 ./build-apk.ps1 -Sdk 'C:/path/to/Android/Sdk'
 ```
 
-The file lands in `build/Nocturne-Mobile.apk`. Keep the generated key in `build/nocturne-debug.jks` to sign update APKs for the same test installation. Android Studio can also open this folder as a Gradle project once the engine is available under `vendor/stable-diffusion.cpp`. Use Gradle 8.10.2 or compatible with Android Gradle Plugin 8.8.2.
+The file lands in `build/Nocturne-Mobile.apk`. Keep the generated key in `build/nocturne-debug.jks` to sign update APKs for the same test installation. Use the PowerShell build for an APK that includes the chat engine.
 
 For the Vulkan APK, put a Windows C/C++ toolchain such as w64devkit and the SDK CMake tools on PATH so ggml can build a host shader generator. Install [SPIRV-Headers](https://github.com/KhronosGroup/SPIRV-Headers) (tested with tag `vulkan-sdk-1.4.350.1`) and check out [Vulkan-Headers 1.4.350](https://github.com/KhronosGroup/Vulkan-Headers/tree/v1.4.350). Then point the build script to their header and CMake directories.
 

@@ -34,6 +34,8 @@ public class EngineService extends Service {
     private native int[] generateNative(String[] keys, String[] paths, byte[] prompt, String sampler,
                                         String mode, int size, int steps, int seed, int threads, float cfg, boolean turbo);
 
+    private native byte[] chatNative(String path, byte[] prompt, int threads);
+
     String library() { return "nocturne_engine"; }
 
     private final Messenger commands = new Messenger(new Handler(Looper.getMainLooper(), message -> {
@@ -62,8 +64,9 @@ public class EngineService extends Service {
     @Override public void onDestroy() { worker.shutdown(); super.onDestroy(); }
 
     private void generate(Bundle input) {
-        File target = new File(input.getString("output"));
-        File part = new File(target.getPath() + ".tmp");
+        String output = input.getString("output");
+        File target = output == null ? null : new File(output);
+        File part = target == null ? null : new File(target.getPath() + ".tmp");
         Bundle result = new Bundle();
         int activeRequest = request;
         try {
@@ -76,6 +79,16 @@ public class EngineService extends Service {
             int size = input.getInt("size");
             String mode = input.getString("mode");
             Bundle components = input.getBundle("components");
+            if ("text".equals(mode)) {
+                byte[] answer = chatNative(components.getString("model_path"), utf8(input.getString("prompt")), input.getInt("threads"));
+                if (cancelling) result.putBoolean("cancelled", true);
+                else if (answer == null || answer.length == 0) throw new IOException("The text engine returned no tokens.");
+                else {
+                    result.putString("answer", new String(answer, StandardCharsets.UTF_8));
+                    result.putBoolean("ok", true);
+                }
+                return;
+            }
             if ("fast".equals(mode)) components.putString("taesd_path", fastDecoder().getAbsolutePath());
             String[] keys = components.keySet().toArray(new String[0]);
             String[] paths = new String[keys.length];
@@ -106,7 +119,7 @@ public class EngineService extends Service {
             result.putBoolean("cancelled", cancelling);
             result.putString("error", error instanceof OutOfMemoryError ? "memory" : error.getMessage());
         } finally {
-            part.delete();
+            if (part != null) part.delete();
             Messenger client = reply;
             reply = null;
             send(client, RESULT, activeRequest, result);

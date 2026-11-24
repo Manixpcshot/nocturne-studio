@@ -1,6 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android" package="studio.nocturne.mobile">
     <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
     <uses-feature android:glEsVersion="0x00020000" android:required="false" />
     <application android:label="Nocturne Studio" android:icon="@mipmap/nocturne_launcher"
         android:roundIcon="@mipmap/nocturne_launcher" android:extractNativeLibs="true"
@@ -13,6 +14,9 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+        <provider android:name=".UpdateProvider" android:authorities="studio.nocturne.mobile.updates"
+            android:exported="false" android:grantUriPermissions="true" />
+        <service android:name=".TextEngineService" android:exported="false" android:process=":chat" />
         <service android:name=".EngineService" android:exported="false" android:process=":engine" />
         <service android:name=".VulkanEngineService" android:exported="false" android:process=":gpu" />
     </application>

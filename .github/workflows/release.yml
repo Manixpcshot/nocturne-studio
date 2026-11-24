@@ -34,6 +34,9 @@ jobs:
           cache: npm
       - run: npm ci
       - shell: pwsh
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
         run: |
           $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
           if ($env:GITHUB_REF_TYPE -eq 'tag' -and $env:GITHUB_REF_NAME -ne "v$version") { throw 'Tag must match the Windows version.' }
@@ -44,6 +47,8 @@ jobs:
           path: |
             ${{ runner.temp }}/release/*.exe
             ${{ runner.temp }}/release/*.zip
+            ${{ runner.temp }}/release/*.sig
+            ${{ runner.temp }}/release/latest.json
           if-no-files-found: error
 
   android:
@@ -126,15 +131,15 @@ jobs:
         run: |
           set -euo pipefail
           cd release
-          sha256sum -- *.exe *.zip *.apk > SHA256SUMS.txt
+          sha256sum -- *.exe *.zip *.apk *.sig latest.json > SHA256SUMS.txt
           if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --json isDraft,assets > "$RUNNER_TEMP/release.json"
             if jq -e '.isDraft | not' "$RUNNER_TEMP/release.json" >/dev/null; then
-              jq -e '[.assets[].name] | any(endswith(".exe")) and any(endswith(".zip")) and any(endswith(".apk")) and any(. == "SHA256SUMS.txt")' "$RUNNER_TEMP/release.json" >/dev/null
+              jq -e '[.assets[].name] | any(endswith(".exe")) and any(endswith(".zip")) and any(endswith(".apk")) and any(. == "SHA256SUMS.txt") and any(. == "latest.json") and any(endswith(".exe.sig"))' "$RUNNER_TEMP/release.json" >/dev/null
               exit 0
             fi
           else
             gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --verify-tag --draft --title "Nocturne Studio $GITHUB_REF_NAME · Windows + Android" --generate-notes
           fi
-          gh release upload "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --clobber -- *.exe *.zip *.apk SHA256SUMS.txt
+          gh release upload "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --clobber -- *.exe *.zip *.apk *.sig latest.json SHA256SUMS.txt
           gh release edit "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft=false --latest

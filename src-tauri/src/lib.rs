@@ -494,12 +494,31 @@ fn stop_backend(download: &DownloadState) -> Result<bool, String> {
 
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
         .manage(Arc::new(Mutex::<Option<Backend>>::new(None)))
         .manage(Arc::new(DownloadState::new()))
         .manage(ModelDownloadState(Arc::new(Mutex::new(HashMap::new()))))
-        .invoke_handler(tauri::generate_handler![backend_command, model_download, cancel_model_download, notify_image_ready, cancel_download, set_model_folder, set_output_folder, setup_status, setup_install, update_diffusers_engine, hardware_usage])
+        .invoke_handler(tauri::generate_handler![install_app_update, backend_command, model_download, cancel_model_download, notify_image_ready, cancel_download, set_model_folder, set_output_folder, setup_status, setup_install, update_diffusers_engine, hardware_usage])
         .run(tauri::generate_context!())
         .expect("failed to run Tauri app");
+}
+
+#[tauri::command]
+async fn install_app_update(app: tauri::AppHandle) -> Result<(), String> {
+    use tauri_plugin_updater::UpdaterExt;
+
+    if cfg!(debug_assertions) || std::env::current_exe().ok()
+        .is_some_and(|exe| exe.with_file_name("nocturne.portable").is_file()) {
+        return Ok(());
+    }
+    let updater = app.updater_builder()
+        .timeout(std::time::Duration::from_secs(8))
+        .build()
+        .map_err(|error| error.to_string())?;
+    if let Some(update) = updater.check().await.map_err(|error| error.to_string())? {
+        update.download_and_install(|_, _| {}, || {}).await.map_err(|error| error.to_string())?;
+    }
+    Ok(())
 }

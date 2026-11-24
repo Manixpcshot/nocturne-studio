@@ -14,7 +14,10 @@
     <div class="brand"><img src="brand.svg" alt="" width="39" height="39"><div><strong>Nocturne</strong><small>Mobile Studio</small></div></div>
     <button id="language" class="language" data-action="language">فارسی</button>
   </header>
-  <div id="activity-strip" class="activity-strip" hidden></div>
+  <div class="activity-rows">
+    <div id="update-alert" class="activity-strip" hidden></div>
+    <div id="activity-strip" class="activity-strip" hidden></div>
+  </div>
   <main id="surface" tabindex="-1">
     <section id="studio" class="screen">
       <h1 class="sr" data-text="studio">Studio</h1>
@@ -46,6 +49,18 @@
       </div>
       <p class="hint" data-text="offlineNote">Once a model is installed, you can create without internet.</p>
     </section>
+    <section id="chat" class="screen" hidden>
+      <h1 data-text="chat">Chat</h1>
+      <p class="lead" data-text="chatIntro"></p>
+      <div class="composer">
+        <label for="chat-select" data-text="textModel"></label>
+        <div id="chat-picker"></div>
+        <div id="chat-result" role="status" aria-live="polite"></div>
+        <label for="chat-prompt" class="sr" data-text="chatPrompt"></label>
+        <textarea id="chat-prompt" dir="auto" rows="3" maxlength="1500" data-placeholder="chatPrompt"></textarea>
+        <div id="chat-actions" class="chat-actions"></div>
+      </div>
+    </section>
     <section id="models" class="screen" hidden>
       <h1 data-text="models">Models</h1>
       <p class="lead" data-text="modelIntro">Choose an image model for your phone.</p>
@@ -69,6 +84,8 @@
       <div class="title-row"><h1 data-text="device">Device</h1><button class="quiet" data-action="refresh" data-text="refresh">Refresh</button></div>
       <p class="lead" data-text="deviceIntro">Hardware and capacity reported by Android.</p>
       <div id="device-details"></div>
+      <h2 class="section-title" data-text="appUpdates">App updates</h2>
+      <div id="update-card" class="composer"></div>
       <h2 class="section-title" data-text="engine">Image engine</h2>
       <div id="engine-list" class="engine-list"></div>
     </section>

@@ -27,6 +27,7 @@ final class Model {
 
     JSONObject entry() { return entry; }
     String id() { return entry.optString("id"); }
+    boolean text() { return "text".equals(entry.optString("task")); }
     String name() { return entry.optString("name"); }
     int ram() { return entry.optInt("ram"); }
     int size() { return entry.optInt("size"); }
