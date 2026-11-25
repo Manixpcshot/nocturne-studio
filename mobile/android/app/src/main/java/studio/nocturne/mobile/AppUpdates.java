@@ -4,6 +4,8 @@ import android.content.Context;
 import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
 import android.os.Build;
+import android.os.Handler;
+import android.os.Looper;
 import android.os.SystemClock;
 import android.util.Log;
 
@@ -28,9 +30,12 @@ final class AppUpdates {
     private static final String API = "https://api.github.com/repos/" + REPO + "/releases/latest";
     private static final Pattern APK = Pattern.compile("Nocturne-Mobile-(\\d{1,5}\\.\\d{1,5}\\.\\d{1,5})-Android-arm64\\.apk");
     private static final long MAX_BYTES = 250L * 1024 * 1024;
+    private static final long CHECK_INTERVAL = 60 * 60 * 1000L;
     private static AppUpdates instance;
     private final Context context;
     private final PackageInfo installed;
+    private final Handler timer = new Handler(Looper.getMainLooper());
+    private Runnable scheduledCheck;
     private volatile JSONObject state = new JSONObject();
     private volatile File verified;
     private long checkedAt = -1;
@@ -55,10 +60,13 @@ final class AppUpdates {
 
     synchronized void check(boolean now, Runnable refresh) {
         long elapsed = SystemClock.elapsedRealtime();
-        long interval = "error".equals(state.optString("phase")) ? 60000L : 6 * 60 * 60 * 1000L;
-        if (checking || (!now && checkedAt >= 0 && elapsed - checkedAt < interval)) return;
+        if (checking || (!now && checkedAt >= 0 && elapsed - checkedAt < CHECK_INTERVAL)) {
+            if (checking && elapsed - checkedAt >= CHECK_INTERVAL) schedule(refresh, 1000);
+            return;
+        }
         checkedAt = elapsed;
         checking = true;
+        schedule(refresh, CHECK_INTERVAL);
         publish(Studio.json("phase", "checking"), refresh);
         new Thread(() -> {
             try { find(refresh); }
@@ -70,6 +78,12 @@ final class AppUpdates {
                 synchronized (this) { checking = false; }
             }
         }, "Nocturne app update").start();
+    }
+
+    private void schedule(Runnable refresh, long delay) {
+        if (scheduledCheck != null) timer.removeCallbacks(scheduledCheck);
+        scheduledCheck = () -> check(false, refresh);
+        timer.postDelayed(scheduledCheck, delay);
     }
 
     private void find(Runnable refresh) throws Exception {

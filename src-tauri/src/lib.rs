@@ -636,39 +636,64 @@ pub fn run() {
         .manage(Arc::new(Mutex::<Option<Backend>>::new(None)))
         .manage(Arc::new(DownloadState::new()))
         .manage(ModelDownloadState(Arc::new(Mutex::new(HashMap::new()))))
+        .manage(PendingAppUpdate::default())
         .setup(|app| {
             diagnostics::record(app.handle(), "startup", "success", None, None);
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![activity_read, activity_clear, activity_interface_error, install_app_update, backend_command, model_download, cancel_model_download, notify_image_ready, cancel_download, set_model_folder, set_output_folder, setup_status, setup_install, update_diffusers_engine, hardware_usage])
+        .invoke_handler(tauri::generate_handler![activity_read, activity_clear, activity_interface_error, check_app_update, install_app_update, backend_command, model_download, cancel_model_download, notify_image_ready, cancel_download, set_model_folder, set_output_folder, setup_status, setup_install, update_diffusers_engine, hardware_usage])
         .run(tauri::generate_context!())
         .expect("failed to run Tauri app");
 }
 
-#[tauri::command]
-async fn install_app_update(app: tauri::AppHandle) -> Result<(), String> {
+#[derive(Default)]
+struct PendingAppUpdate(Mutex<Option<tauri_plugin_updater::Update>>);
 
-    if cfg!(debug_assertions) || std::env::current_exe().ok()
-        .is_some_and(|exe| exe.with_file_name("nocturne.portable").is_file()) {
-        return Ok(());
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AvailableAppUpdate {
+    version: String,
+    portable: bool,
+}
+
+#[tauri::command]
+async fn check_app_update(app: AppHandle, pending: State<'_, PendingAppUpdate>) -> Result<Option<AvailableAppUpdate>, String> {
+    use tauri_plugin_updater::UpdaterExt;
+    if cfg!(debug_assertions) {
+        return Ok(None);
     }
     let started = Instant::now();
-    let result = check_app_update(&app).await;
-    diagnostics::outcome(&app, "install_app_update", &result.clone().map(|_| Value::Null), started, false);
+    let portable = std::env::current_exe().ok()
+        .is_some_and(|exe| exe.with_file_name("nocturne.portable").is_file());
+    let result = async {
+        let updater = app.updater_builder()
+            .timeout(std::time::Duration::from_secs(8))
+            .build()
+            .map_err(|error| error.to_string())?;
+        let mut update = updater.check().await.map_err(|error| error.to_string())?;
+        let available = update.as_ref().map(|update| AvailableAppUpdate { version: update.version.clone(), portable });
+        if let Some(update) = update.as_mut() {
+            // The check has a short deadline. Packages can take longer to transfer.
+            update.timeout = Some(std::time::Duration::from_secs(600));
+        }
+        *pending.0.lock().map_err(|error| error.to_string())? = if portable { None } else { update };
+        Ok(available)
+    }.await;
+    diagnostics::outcome(&app, "check_app_update", &result.as_ref().map(|_| Value::Null).map_err(String::clone), started, false);
     result
 }
 
-async fn check_app_update(app: &AppHandle) -> Result<(), String> {
-    use tauri_plugin_updater::UpdaterExt;
-    let updater = app.updater_builder()
-        .timeout(std::time::Duration::from_secs(8))
-        .build()
-        .map_err(|error| error.to_string())?;
-    if let Some(update) = updater.check().await.map_err(|error| error.to_string())? {
-        diagnostics::record(app, "install_app_update", "started", None, None);
-        update.download_and_install(|_, _| {}, || {}).await.map_err(|error| error.to_string())?;
+#[tauri::command]
+async fn install_app_update(app: AppHandle, pending: State<'_, PendingAppUpdate>) -> Result<(), String> {
+    let update = pending.0.lock().map_err(|error| error.to_string())?.take();
+    let Some(update) = update else { return Ok(()); };
+    let started = Instant::now();
+    diagnostics::record(&app, "install_app_update", "started", None, None);
+    let result = update.download_and_install(|_, _| {}, || {}).await.map_err(|error| error.to_string());
+    diagnostics::outcome(&app, "install_app_update", &result.clone().map(|_| Value::Null), started, false);
+    if result.is_ok() {
         #[cfg(target_os = "linux")]
         app.restart();
     }
-    Ok(())
+    result
 }

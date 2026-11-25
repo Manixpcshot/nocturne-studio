@@ -16,7 +16,7 @@ import './redesign.css';
 import { mountDownloadCenter, type DownloadJob, type DownloadKind, type DownloadPlan, type EngineUpgrade, type Transfer } from './downloads';
 import { hideStartup, showStartup, startupFailed } from './startup';
 import './projects.css';
-import { styleLibrary, stylePrompt } from './styles-library';
+import { mountStyleLibrary } from './styles-library';
 import { mountMixedQueue } from './mixed-queue';
 import { activityPage, mountActivity } from './activity';
 import { activateProject, addProject, buildCombinations, newId, pendingQueue, persistQueue, projectId, projects, relatedImages, scopedKey, stored, type QueueJob } from './projects';
@@ -129,6 +129,7 @@ let viewerPrompt = '';
 let viewerZoom = 1;
 let showGalleryDetails = localStorage.getItem('nocturne-gallery-details') === '1';
 let mixedRefresh: (() => void) | undefined;
+let localizeStyles: (() => void) | undefined;
 let videoReference = '';
 let phoneLink = '';
 let videos: { name: string; date: string; project_id?: string; parent_image?: string }[] = [];
@@ -208,7 +209,7 @@ const english: Record<string, string> = {
   'استودیوی تصویر':'Image studio','محیط کار':'Workspace','ساخت تصویر':'Create image','ساخت دسته‌ای':'Batch studio','ساخت ویدیو':'Create video','ساخت صدا':'Create audio','گالری صدا':'Audio gallery','مدل‌ها و جست‌وجو':'Models and search','گالری من':'My gallery','دستگاه پردازش':'Processing device','دستگاه انتخابی':'Selected device','رم سیستم':'System RAM','کارت گرافیک':'Graphics card','استودیو':'Studio','در حال آماده‌سازی...':'Getting ready...','تخیّل کن، تصویرش کن':'Imagine it. Create it','ایده‌ات را بنویس؛ Nocturne آن را با مدل انتخابی تو به تصویر تبدیل می‌کند.':'Describe your idea and Nocturne will create it with your selected model.','بوم تصویر':'Image canvas','هنوز تصویری ساخته نشده':'No image yet','ایدهٔ بعدی‌ات اینجا جان می‌گیرد':'Your next idea starts here','پرامپت را بنویس و روی «ساخت تصویر» بزن.':'Write a prompt and select Create image.','کتابخانهٔ تو':'Your library','عکس‌های اخیر':'Recent images','نمایش همه':'View all','پرامپت تصویر':'Image prompt','فارسی یا انگلیسی بنویس':'Write in Persian or English','انتخاب مدل':'Select model','عکس موقت؛ تا زمان ذخیره وارد گالری نشود':'Temporary image; save it to add it to the gallery','پنهان‌کردن تصویر روی بوم':'Hide image preview','پیش‌نمایش پنهان است':'Preview hidden','نمایش این عکس':'Reveal image','هنوز عکسی ذخیره نشده است.':'No saved images yet.','عکس موقت ساخته شد. برای نگه‌داشتن آن «ذخیره» را بزن.':'Temporary image created. Select Save to keep it.','عکس در پوشهٔ خروجی ذخیره شد.':'Image saved to the output folder.','همهٔ مدل‌ها':'All models','عکسی در این دسته پیدا نشد.':'No images in this category.','گالری تصاویر':'Image gallery','تمام تصویرهایی که با برنامه ساخته‌ای، همین‌جا نگهداری می‌شوند.':'Your saved images appear here.','نمایش پرامپت و مدل زیر عکس‌ها':'Show prompt and model under images','آماده‌سازی اولیه':'First run setup','برنامه پیش‌نیازها را بررسی می‌کند و فقط مواردِ نصب‌نشده را دریافت می‌کند. نصب مدل‌های هوش مصنوعی جداگانه و به انتخاب شماست.':'The app checks prerequisites and downloads only missing components. AI models are installed separately when you choose.','تلاش دوباره':'Retry','در حال جست‌وجو...':'Searching...','دانلود مدل':'Download model','بررسی':'Inspect','مدل‌های فارسی':'Persian models','مدل‌های محبوب':'Popular models','ساخت گفتار':'Generate speech','متنی که خوانده شود':'Text to read','مدل نصب‌شده و زبان':'Installed model and language','صدا در پوشهٔ خروجی ذخیره می‌شود.':'Audio is saved to the output folder.','جست‌وجوی مدل صدا':'Search voice models','تغییر پوشهٔ دانلود مدل‌ها':'Change model download folder','جست‌وجو':'Search','پخش صدا':'Play audio','هنوز صدایی ساخته نشده است.':'No audio yet.','پوشهٔ دانلود مدل‌ها':'Model download folder','مدل‌های روی سیستم':'Local models','در حال بررسی...':'Checking...'
 };
 Object.assign(english, {
-  'استودیوی پروژه':'Project studio','همهٔ پروژه‌ها':'All projects','باز کردن قالب‌ها':'Browse styles',
+  'استودیوی پروژه':'Project studio','همهٔ پروژه‌ها':'All projects','نمونه‌های سبک':'Style examples',
   'صف پروژه':'Project queue','گالری پروژه':'Project gallery','کارها و خطاهای ثبت‌شده':'Recorded jobs and errors',
   'جست‌وجو و مدیریت مدل‌ها':'Find and manage models','ساخت، ویرایش و مقایسهٔ تصویر':'Create, edit and compare images',
   'گزارش فعالیت':'Activity log','کاربران و سهمیه‌ها':'Users and quotas','اتصال گوشی و سرور':'Server and phone',
@@ -235,15 +236,15 @@ const queueLabels = [
   [/^([\d,]+) images generated$/, "$1 تصویر ساخته شد", /^([\d,]+) تصویر ساخته شد$/, "$1 images generated"],
 ] as const;
 
+let mixedLanguage = '';
 function applyLanguage() {
+  if (mixedLanguage !== language && mixedRefresh) {
+    mixedLanguage = language;
+    mixedRefresh();
+  }
   activity?.localize();
   refreshStudioProject();
-  const styleGrid = document.querySelector('#style-grid');
-  if (styleGrid && styleGrid.getAttribute('data-language') !== language) {
-    styleGrid.innerHTML = styleLibrary(language === 'en');
-    styleGrid.setAttribute('data-language', language);
-    mixedRefresh?.();
-  }
+  localizeStyles?.();
   document.documentElement.lang = language;
   document.documentElement.dir = language === 'en' ? 'ltr' : 'rtl';
   const select = document.querySelector<HTMLSelectElement>('#language-select'); if (select) select.value = language;
@@ -463,15 +464,8 @@ function organizeStudioView() {
   head.after(tabs);
   const dock = document.createElement('div');
   dock.className = 'studio-dock';
-  dock.innerHTML = '<div><span>استودیوی پروژه</span><strong data-studio-project dir="auto"></strong></div><div class="studio-shortcuts"><button type="button" id="studio-open-styles" class="small-button">باز کردن قالب‌ها</button><button type="button" id="studio-open-queue" class="small-button">صف پروژه</button><button type="button" id="studio-open-gallery" class="small-button">گالری پروژه</button></div>';
+  dock.innerHTML = '<div><span>استودیوی پروژه</span><strong data-studio-project dir="auto"></strong></div><div class="studio-shortcuts"><button type="button" id="studio-open-queue" class="small-button">صف پروژه</button><button type="button" id="studio-open-gallery" class="small-button">گالری پروژه</button></div>';
   tabs.after(dock);
-  dock.querySelector<HTMLButtonElement>('#studio-open-styles')!.onclick = () => {
-    setStudioMode('create');
-    const styles = document.querySelector<HTMLDetailsElement>('.style-library')!;
-    styles.open = true;
-    styles.scrollIntoView({block: 'nearest'});
-    styles.querySelector('input')?.focus({preventScroll: true});
-  };
   dock.querySelector<HTMLButtonElement>('#studio-open-queue')!.onclick = () => {
     openWorkspace('batch');
     document.querySelector<HTMLButtonElement>('[data-batch-mode="mixed"]')?.click();
@@ -685,7 +679,7 @@ function render() {
         <section class="view active" id="studio-view">
           <div class="studio-head"><div><span class="eyebrow">CREATE YOUR VISION</span><h1>تخیّل کن، تصویرش کن<span>.</span></h1><p>ایده‌ات را بنویس؛ Nocturne آن را با مدل انتخابی تو به تصویر تبدیل می‌کند.</p></div></div>
           <div class="studio-grid"><div class="canvas-panel"><div class="panel-top"><div><span class="panel-kicker">بوم تصویر</span><h2 id="canvas-title">هنوز تصویری ساخته نشده</h2></div><button class="icon-button" id="save-image" title="ذخیرهٔ عکس" disabled>${icon('Save')}</button></div><div class="canvas-stage" id="canvas-stage"><div class="ambient-orb orb-a"></div><div class="ambient-orb orb-b"></div><div class="empty-state"><div class="empty-icon">${icon('ImagePlus', 42)}</div><h3>ایدهٔ بعدی‌ات اینجا جان می‌گیرد</h3><p>پرامپت را بنویس و روی «ساخت تصویر» بزن.</p></div></div></div><div class="recent-panel"><div class="recent-head"><div><span class="panel-kicker">کتابخانهٔ تو</span><h2>عکس‌های اخیر</h2></div><button class="text-button" data-view="gallery">نمایش همه ${icon('ArrowUpLeft', 15)}</button></div><div class="recent-grid" id="recent-grid"></div></div></div>
-          <div class="composer"><div class="image-options"><label><input id="temporary-image" type="checkbox" ${temporaryImage ? 'checked' : ''}/> عکس موقت؛ تا زمان ذخیره وارد گالری نشود</label><label><input id="hide-image" type="checkbox" ${hideImage ? 'checked' : ''}/> پنهان‌کردن تصویر روی بوم</label><label><input id="hide-recent" type="checkbox" ${hideRecent ? 'checked' : ''}/> پنهان‌کردن عکس‌های اخیر</label><label><input id="hide-compare" type="checkbox" ${hideCompare ? 'checked' : ''}/> پنهان‌کردن نتیجهٔ مقایسه</label><label><input id="hide-gallery" type="checkbox" ${hideGallery ? 'checked' : ''}/> تارکردن تصاویر گالری</label><button id="privacy-cover-button" class="small-button">${icon('ShieldCheck', 15)} پوشش فوری · Ctrl+Shift+H</button></div><div class="composer-top"><span>${icon('Sparkles', 16)} پرامپت تصویر</span><span>فارسی یا انگلیسی بنویس</span></div><textarea id="prompt" dir="auto" placeholder="مثلاً: شهری بارانی در شب، نورهای نئون، نمای سینمایی..."></textarea><div class="composer-bottom"><button class="model-pill" id="model-pill">${icon('Blocks', 16)}<span id="active-model-label">انتخاب مدل</span>${icon('ArrowUpLeft', 14)}</button>${aspectPicker('image-aspect')}<button class="primary-button" id="generate" data-work>${icon('Sparkles', 18)}<span>ساخت تصویر</span><span class="button-shine"></span></button></div><details class="studio-fold style-library"><summary>قالب‌های تصویر</summary><div class="style-controls"><label for="style-subject">موضوع قالب</label><input id="style-subject" dir="auto" maxlength="800" placeholder="سوژهٔ دلخواه یا روباه نمونه"/><span>قالب، پرامپت قابل‌ویرایش را وارد می‌کند.</span></div><div class="style-grid" id="style-grid"></div></details><details id="prompt-presets" class="studio-fold prompt-presets"><summary>${icon('Save', 16)}<span>پرامپت‌های ذخیره‌شده</span><span class="fold-chevron">⌄</span></summary><div class="preset-controls"><label for="preset-name">نام پرامپت</label><div class="preset-row"><input id="preset-name" maxlength="60"/><button id="preset-save" class="small-button">ذخیرهٔ پرامپت</button></div><label for="preset-select">انتخاب پرامپت ذخیره‌شده</label><select id="preset-select"></select><div class="preset-actions"><button id="preset-load" class="small-button">استفاده</button><button id="preset-remove" class="small-button">حذف</button></div></div></details></div><div class="edit-panel"><div class="card-heading"><div>${icon('Images')}<h2>ویرایش عکس با مدل</h2></div><button id="check-image-input" class="small-button">${icon('ScanEye', 15)} بررسی ورودی عکس</button></div><p>عکس دلخواه را انتخاب کن. نتیجهٔ بررسی فقط راهنماست؛ حتی اگر پشتیبانی تأیید نشد، می‌توانی ساخت را امتحان کنی.</p><div class="edit-grid"><label class="edit-upload">${icon('Images', 24)}<span>انتخاب عکس ورودی</span><input id="edit-source" type="file" accept="image/png,image/jpeg,image/webp"/></label><img id="edit-source-preview" alt="عکس ورودی" hidden/></div><p id="image-input-status">یک مدل و عکس انتخاب کن؛ سپس بررسی یا ویرایش را بزن.</p><textarea id="edit-prompt" placeholder="تغییر دلخواه را بنویس؛ مثلاً آسمان را غروب کن و ساختمان‌ها را نگه دار..."></textarea><label class="edit-strength">شدت تغییر <input id="edit-strength" type="range" min="0.1" max="0.95" step="0.05" value="0.65"/><b id="edit-strength-value">۰٫۶۵</b></label><button id="edit-generate" class="primary-button" data-work>${icon('Sparkles',18)} ویرایش عکس</button></div><div class="compare-panel"><h2>مقایسهٔ دو مدل</h2><p>یک پرامپت، دو خروجی کنار هم. تصاویر موقت‌اند تا خودت ذخیره‌شان کنی.</p><div class="compare-controls"><select id="compare-model-a"></select><select id="compare-model-b"></select><button id="compare-start" class="primary-button">${icon('Images', 17)} مقایسه</button></div><p id="compare-status"></p><div id="compare-results" class="compare-results"></div></div>
+          <div class="composer"><div class="image-options"><label><input id="temporary-image" type="checkbox" ${temporaryImage ? 'checked' : ''}/> عکس موقت؛ تا زمان ذخیره وارد گالری نشود</label><label><input id="hide-image" type="checkbox" ${hideImage ? 'checked' : ''}/> پنهان‌کردن تصویر روی بوم</label><label><input id="hide-recent" type="checkbox" ${hideRecent ? 'checked' : ''}/> پنهان‌کردن عکس‌های اخیر</label><label><input id="hide-compare" type="checkbox" ${hideCompare ? 'checked' : ''}/> پنهان‌کردن نتیجهٔ مقایسه</label><label><input id="hide-gallery" type="checkbox" ${hideGallery ? 'checked' : ''}/> تارکردن تصاویر گالری</label><button id="privacy-cover-button" class="small-button">${icon('ShieldCheck', 15)} پوشش فوری · Ctrl+Shift+H</button></div><div class="composer-top"><span>${icon('Sparkles', 16)} پرامپت تصویر</span><button id="studio-open-styles" class="small-button style-trigger" type="button">${icon('Images', 15)} <span>نمونه‌های سبک</span></button></div><textarea id="prompt" dir="auto" placeholder="مثلاً: شهری بارانی در شب، نورهای نئون، نمای سینمایی..."></textarea><div class="composer-bottom"><button class="model-pill" id="model-pill">${icon('Blocks', 16)}<span id="active-model-label">انتخاب مدل</span>${icon('ArrowUpLeft', 14)}</button>${aspectPicker('image-aspect')}<button class="primary-button" id="generate" data-work>${icon('Sparkles', 18)}<span>ساخت تصویر</span><span class="button-shine"></span></button></div><details id="prompt-presets" class="studio-fold prompt-presets"><summary>${icon('Save', 16)}<span>پرامپت‌های ذخیره‌شده</span><span class="fold-chevron">⌄</span></summary><div class="preset-controls"><label for="preset-name">نام پرامپت</label><div class="preset-row"><input id="preset-name" maxlength="60"/><button id="preset-save" class="small-button">ذخیرهٔ پرامپت</button></div><label for="preset-select">انتخاب پرامپت ذخیره‌شده</label><select id="preset-select"></select><div class="preset-actions"><button id="preset-load" class="small-button">استفاده</button><button id="preset-remove" class="small-button">حذف</button></div></div></details></div><div class="edit-panel"><div class="card-heading"><div>${icon('Images')}<h2>ویرایش عکس با مدل</h2></div><button id="check-image-input" class="small-button">${icon('ScanEye', 15)} بررسی ورودی عکس</button></div><p>عکس دلخواه را انتخاب کن. نتیجهٔ بررسی فقط راهنماست؛ حتی اگر پشتیبانی تأیید نشد، می‌توانی ساخت را امتحان کنی.</p><div class="edit-grid"><label class="edit-upload">${icon('Images', 24)}<span>انتخاب عکس ورودی</span><input id="edit-source" type="file" accept="image/png,image/jpeg,image/webp"/></label><img id="edit-source-preview" alt="عکس ورودی" hidden/></div><p id="image-input-status">یک مدل و عکس انتخاب کن؛ سپس بررسی یا ویرایش را بزن.</p><textarea id="edit-prompt" placeholder="تغییر دلخواه را بنویس؛ مثلاً آسمان را غروب کن و ساختمان‌ها را نگه دار..."></textarea><label class="edit-strength">شدت تغییر <input id="edit-strength" type="range" min="0.1" max="0.95" step="0.05" value="0.65"/><b id="edit-strength-value">۰٫۶۵</b></label><button id="edit-generate" class="primary-button" data-work>${icon('Sparkles',18)} ویرایش عکس</button></div><div class="compare-panel"><h2>مقایسهٔ دو مدل</h2><p>یک پرامپت، دو خروجی کنار هم. تصاویر موقت‌اند تا خودت ذخیره‌شان کنی.</p><div class="compare-controls"><select id="compare-model-a"></select><select id="compare-model-b"></select><button id="compare-start" class="primary-button">${icon('Images', 17)} مقایسه</button></div><p id="compare-status"></p><div id="compare-results" class="compare-results"></div></div>
         </section>
         <section class="view" id="batch-view"><div class="section-head"><span class="eyebrow">BATCH STUDIO</span><h1>ساخت دسته‌ای</h1><p>موضوع را بنویس، تعداد را انتخاب کن و در صورت تمایل، کار را بین GPU و CPU تقسیم کن.</p></div><div class="batch-layout"><div class="model-card batch-card"><div class="card-heading"><div>${icon('Layers')}<h2>تنظیمات ساخت دسته‌ای</h2></div></div><label class="batch-label" for="batch-topic">موضوع تصویرها</label><textarea id="batch-topic" class="batch-topic" placeholder="مثلاً: شهر آینده در شب، نورهای نئون، هوای بارانی"></textarea><div class="batch-count-row"><label class="batch-label" for="batch-count">تعداد تصویر</label><input id="batch-count" type="number" min="1" step="1" value="10"/><span>بدون سقف تعداد</span></div>${aspectPicker('batch-aspect')}<label class="batch-split"><input id="batch-split-cpu" type="checkbox"/> نصف تصویرها در پردازش GPU و نصف دیگر در پردازش جداگانهٔ CPU</label><p class="batch-split-note">دو پردازش مستقل، هرکدام عکس‌های سهم خود را یکی‌یکی می‌سازند. مدل CPU رم بیشتری می‌گیرد و ممکن است کندتر باشد.</p><div class="batch-actions"><button class="primary-button" id="start-batch" data-work>${icon('Sparkles', 18)} شروع ساخت</button><button class="cancel-download" id="stop-batch" hidden>توقف ساخت</button></div><p class="batch-note">Each image is saved when ready. Active model: <b id="batch-model">انتخاب نشده</b></p><div id="batch-progress" class="batch-progress hidden"><div class="download-head"><strong id="batch-state">در حال آماده‌سازی...</strong><b id="batch-percent">۰٪</b></div><div class="download-track"><div id="batch-fill"></div></div><p id="batch-details">۰ از ۰ تصویر ساخته شد</p><p id="batch-workers">GPU: ۰ · CPU: ۰</p></div></div><div class="model-card ideas-card"><div class="card-heading"><div>${icon('Lightbulb')}<h2>ایده‌ها</h2></div><button class="small-button" id="shuffle-ideas">ایده‌های دیگر</button></div><p class="ideas-intro">روی یک ایده بزن تا در کادر موضوع قرار بگیرد.</p><div id="ideas-list" class="ideas-list"></div></div></div><div class="model-card queue-card"><div class="card-heading"><div>${icon('Layers')}<h2>صف چندمدلی</h2></div><button class="small-button" id="queue-add">افزودن مدل</button></div><p class="queue-hint">موضوع را در کادر بالا بنویس. مدل‌ها به ترتیب ردیف‌ها اجرا می‌شوند و هر عکس همان لحظه ذخیره می‌شود.</p><div id="queue-rows"></div><div class="queue-total">مجموع: <b id="queue-total">۰</b> عکس</div><div class="batch-actions"><button class="primary-button" id="queue-start" data-work>${icon('Sparkles', 18)} شروع صف</button><button class="cancel-download" id="queue-stop" hidden>توقف صف</button></div><div id="queue-progress" class="batch-progress hidden"><div class="download-head"><strong id="queue-state">در انتظار شروع</strong><b id="queue-percent">۰٪</b></div><div class="download-track"><div id="queue-fill"></div></div><p id="queue-details">۰ عکس ساخته شد</p></div></div><div class="model-card snake-card hidden" id="snake-card"><div class="card-heading"><div>${icon('Sparkles')}<h2>مار بازی هنگام ساخت</h2></div><button class="small-button" id="snake-restart">شروع دوباره</button></div><p id="snake-message">با کلیدهای جهت‌دار یا WASD بازی کن. ساخت عکس‌ها ادامه دارد.</p><div class="snake-content"><canvas id="snake-canvas" width="320" height="320" aria-label="بازی مار"></canvas><div class="snake-side"><b>Score: <span id="snake-score">۰</span></b><div class="snake-controls"><button data-snake-dir="up">↑</button><button data-snake-dir="left">←</button><button data-snake-dir="down">↓</button><button data-snake-dir="right">→</button></div></div></div></div></section>
         <section class="view" id="video-view"><div class="section-head"><span class="eyebrow">MOTION STUDIO</span><h1>ساخت ویدیو</h1><p>مدل ویدیوساز را انتخاب کن، پرامپت بنویس و ویدیو را روی سیستم ذخیره کن.</p></div><div class="video-layout"><div class="canvas-panel"><div class="panel-top"><div><span class="panel-kicker">بوم ویدیو</span><h2 id="video-title">هنوز ویدیویی ساخته نشده</h2></div></div><div class="video-stage" id="video-stage"><div class="empty-state"><div class="empty-icon">${icon('Film', 42)}</div><h3>ویدیوی تو اینجا نمایش داده می‌شود</h3><p>مدل ویدیوساز را از بخش مدل‌ها انتخاب کن.</p></div></div></div><div class="composer"><div class="composer-top"><span>${icon('Sparkles', 16)} پرامپت ویدیو</span><span>فارسی یا انگلیسی بنویس</span></div><div class="workflow-row" id="video-reference-row" hidden><strong id="video-reference-name"></strong><button class="small-button" id="clear-video-reference">حذف عکس مرجع</button></div><textarea id="video-prompt" placeholder="مثلاً: روباهی در جنگل برفی قدم می‌زند، حرکت دوربین آرام..."></textarea><div class="composer-bottom"><button class="model-pill" id="video-model-pill">${icon('Blocks', 16)}<span id="active-video-model-label">انتخاب مدل ویدیو</span></button><button class="primary-button" id="generate-video" data-work>${icon('Film', 18)}<span>ساخت ویدیو</span><span class="button-shine"></span></button></div></div><div class="model-card"><div class="card-heading"><div>${icon('Film')}<h2>ویدیوهای ساخته‌شده</h2></div></div><div id="video-gallery" class="video-gallery"></div></div></div></section>
@@ -696,6 +690,11 @@ function render() {
   applyTheme(localStorage.getItem('nocturne-theme'));
   organizeModelsView();
   organizeStudioView();
+  localizeStyles = mountStyleLibrary(app, document.querySelector<HTMLButtonElement>('#studio-open-styles')!,
+    () => language === 'en', (prompt, ratio) => {
+      parentImage = '';
+      loadPrompt(prompt, ratio);
+    });
   organizeWorkspace();
   organizeBatchStudio();
   refreshIcons();
@@ -2385,18 +2384,6 @@ function attachEvents() {
     setView('video');
     document.querySelector<HTMLTextAreaElement>('#video-prompt')!.focus();
   };
-  document.querySelector('#style-grid')!.addEventListener('click', event => {
-    const card = (event.target as Element).closest<HTMLButtonElement>('[data-image-style]');
-    if (!card || busy) return;
-    const subject = document.querySelector<HTMLInputElement>('#style-subject')!.value.trim();
-    const result = stylePrompt(Number(card.dataset.imageStyle), subject);
-    if (!result) return;
-    const area = document.querySelector<HTMLTextAreaElement>('#prompt')!;
-    const previous = area.value;
-    if (previous.trim() && !window.confirm(language === 'en' ? 'Replace the current image prompt?' : 'پرامپت فعلی جایگزین شود؟')) return;
-    parentImage = '';
-    loadPrompt(result.text, result.ratio);
-  });
   document.querySelector<HTMLButtonElement>('#viewer-zoom-in')!.onclick = () => { viewerZoom = Math.min(4, viewerZoom + .25); document.querySelector<HTMLImageElement>('#modal-image')!.style.transform = `scale(${viewerZoom})`; };
   document.querySelector<HTMLButtonElement>('#viewer-zoom-out')!.onclick = () => { viewerZoom = Math.max(.5, viewerZoom - .25); document.querySelector<HTMLImageElement>('#modal-image')!.style.transform = `scale(${viewerZoom})`; };
   document.querySelector<HTMLButtonElement>('#viewer-save')!.onclick = () => { const image = document.querySelector<HTMLImageElement>('#modal-image')!; const a = document.createElement('a'); a.href = image.src; a.download = document.querySelector('#modal-caption')!.textContent || 'nocturne.png'; a.click(); };
@@ -2534,13 +2521,65 @@ async function initialize() {
   } else setBusy(false);
 }
 
+const UPDATE_INTERVAL = 60 * 60 * 1000;
+let updateScheduled = false;
+let updateInProgress = false;
+let updateInstallTimer: number | undefined;
+let portableUpdateNotified = '';
+
+async function installPendingUpdate() {
+  updateInstallTimer = undefined;
+  if (updateInProgress || !downloadsReady || busy || downloadCenter.running()) {
+    updateInstallTimer = window.setTimeout(installPendingUpdate, 15000);
+    return;
+  }
+  updateInProgress = true;
+  setBusy(true, language === 'en' ? 'Installing app update…' : 'در حال نصب به‌روزرسانی برنامه…');
+  try { await invoke('install_app_update'); }
+  catch (error) { console.warn('App update could not be installed', error); }
+  finally {
+    setBusy(false);
+    updateInProgress = false;
+    void downloadCenter.drain();
+  }
+}
+
+function scheduleAppUpdates() {
+  if (updateScheduled) return;
+  updateScheduled = true;
+  const check = async () => {
+    if (updateInProgress) return;
+    updateInProgress = true;
+    try {
+      const update = await invoke<{version: string; portable: boolean} | null>('check_app_update');
+      window.clearTimeout(updateInstallTimer);
+      updateInstallTimer = undefined;
+      if (!update) return;
+      if (update.portable) {
+        if (portableUpdateNotified !== update.version) {
+          portableUpdateNotified = update.version;
+          toast(language === 'en' ? `Portable version ${update.version} is available on GitHub.`
+            : `نسخهٔ قابل‌حمل ${update.version} در گیت‌هاب آمادهٔ دریافت است.`);
+        }
+        return;
+      }
+      updateInstallTimer = window.setTimeout(installPendingUpdate, 0);
+    } catch (error) {
+      console.warn('App update check failed', error);
+    } finally {
+      updateInProgress = false;
+    }
+  };
+  void check();
+  window.setInterval(check, UPDATE_INTERVAL);
+}
+
 async function boot() {
   let rendered = false;
   try {
     render();
     rendered = true;
-    try { await invoke("install_app_update"); }
-    catch (error) { console.warn("App update could not be installed", error); }
+    scheduleAppUpdates();
     await initialize();
     hideStartup();
     downloadsReady = true;

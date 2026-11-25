@@ -28,6 +28,7 @@ const labels: Labels = {
   load: ['Load model', 'بارگذاری مدل'], unload: ['Unload model', 'خروج مدل از حافظه'], info: ['Inspect model', 'بررسی مدل'],
   device: ['Change device', 'تغییر دستگاه'], startup: ['Open app', 'اجرای برنامه'],
   setup_install: ['Install dependencies', 'نصب پیش‌نیازها'], install_app_update: ['App update', 'به‌روزرسانی برنامه'],
+  check_app_update: ['Check for app updates', 'بررسی به‌روزرسانی برنامه'],
   web_generate: ['Generate from the website', 'ساخت از وب‌سایت'], web_start: ['Start server', 'راه‌اندازی سرور'],
   web_stop: ['Stop server', 'توقف سرور'], interface: ['Interface error', 'خطای رابط'],
 };

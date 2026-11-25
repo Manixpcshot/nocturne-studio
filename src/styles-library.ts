@@ -13,13 +13,67 @@ export const imageStyles = [
   ['سه‌بعدی استودیویی', 'Studio 3D', '1:1', 'Stylized 3D character render, rounded soft-toy proportions, seamless cobalt studio backdrop, area lighting, soft contact shadows'],
 ] as const;
 
-export function styleLibrary(en: boolean) {
-  return imageStyles.map(([fa, label, ratio], index) => `<button type="button" class="style-card" data-image-style="${index}">
-    <span class="style-art" aria-hidden="true" style="--tile-x:${index % 5 * 25}%;--tile-y:${Math.floor(index / 5) * 100}%"></span>
-    <strong>${en ? label : fa}</strong><bdi>${ratio}</bdi></button>`).join('');
-}
+export function mountStyleLibrary(
+  parent: HTMLElement,
+  trigger: HTMLButtonElement,
+  isEnglish: () => boolean,
+  apply: (prompt: string, ratio: string) => void,
+) {
+  const dialog = document.createElement('dialog');
+  dialog.id = 'style-library';
+  dialog.className = 'style-library';
+  dialog.setAttribute('aria-labelledby', 'style-library-title');
+  trigger.setAttribute('aria-haspopup', 'dialog');
+  trigger.setAttribute('aria-controls', dialog.id);
+  dialog.innerHTML = `
+    <header class="style-header">
+      <h2 id="style-library-title"></h2>
+      <button type="button" class="small-button style-close" autofocus>×</button>
+    </header>
+    <div class="style-grid" id="style-grid">${imageStyles.map(([, , ratio], index) => `
+      <button type="button" class="style-card" data-image-style="${index}" aria-pressed="false">
+        <span class="style-art" aria-hidden="true" style="--tile-x:${index % 5 * 25}%;--tile-y:${Math.floor(index / 5) * 100}%"></span>
+        <span class="style-card-label"><strong></strong><bdi>${ratio}</bdi></span>
+      </button>`).join('')}</div>
+    <form class="style-controls">
+      <label for="style-subject"></label>
+      <input id="style-subject" dir="auto" maxlength="800" autocomplete="off">
+      <p class="style-preview" dir="ltr" aria-live="polite"></p>
+      <button type="submit" class="primary-button style-apply"></button>
+    </form>`;
+  parent.append(dialog);
 
-export function stylePrompt(index: number, subject: string) {
-  const style = imageStyles[index];
-  return style ? { ratio: style[2], text: `${subject.trim() || 'An orange fox'}. ${style[3]}.` } : null;
+  const cards = Array.from(dialog.querySelectorAll<HTMLButtonElement>('.style-card'));
+  const close = dialog.querySelector<HTMLButtonElement>('.style-close')!;
+  const subject = dialog.querySelector<HTMLInputElement>('#style-subject')!;
+  const preview = dialog.querySelector<HTMLElement>('.style-preview')!;
+  let selected = 0;
+  const prompt = () => `${subject.value.trim() || 'An orange fox'}. ${imageStyles[selected][3]}.`;
+  const updatePreview = () => { preview.textContent = prompt(); };
+  cards.forEach((card, index) => card.onclick = () => {
+    cards[selected].setAttribute('aria-pressed', 'false');
+    selected = index;
+    card.setAttribute('aria-pressed', 'true');
+    updatePreview();
+  });
+  cards[0].setAttribute('aria-pressed', 'true');
+  subject.oninput = updatePreview;
+  close.onclick = () => dialog.close();
+  trigger.onclick = () => { if (!dialog.open) dialog.showModal(); };
+  dialog.querySelector('form')!.onsubmit = event => {
+    event.preventDefault();
+    dialog.close();
+    apply(prompt(), imageStyles[selected][2]);
+  };
+  updatePreview();
+
+  return () => {
+    const en = isEnglish();
+    dialog.querySelector('h2')!.textContent = en ? 'Style examples' : 'نمونه‌های سبک';
+    close.setAttribute('aria-label', en ? 'Close style examples' : 'بستن نمونه‌های سبک');
+    dialog.querySelector('label')!.textContent = en ? 'Subject' : 'سوژه';
+    subject.placeholder = en ? 'Optional · example: an orange fox' : 'اختیاری، مثلاً یک روباه نارنجی';
+    dialog.querySelector('.style-apply')!.textContent = en ? 'Replace prompt and set size' : 'جایگزینی پرامپت و تنظیم اندازه';
+    cards.forEach((card, index) => { card.querySelector('strong')!.textContent = imageStyles[index][en ? 1 : 0]; });
+  };
 }
