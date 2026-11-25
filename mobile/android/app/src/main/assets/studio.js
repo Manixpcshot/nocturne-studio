@@ -1,6 +1,7 @@
 "use strict";
 
 const text = {
+  deviceHardware: ["Hardware", "سخت‌افزار"],
   activityTitle: ["Activity log", "گزارش فعالیت"], activityAll: ["All statuses", "همهٔ وضعیت‌ها"],
   activityClear: ["Clear history", "پاک کردن گزارش"], activityEmpty: ["No recorded activity.", "رویدادی ثبت نشده."],
   activityConfirm: ["Clear all activity records?", "گزارش فعالیت پاک شود؟"],
@@ -547,6 +548,12 @@ document.addEventListener("click", (event) => {
     case "select": bridge?.select(value); switchView(data.models.some((item) => item.id === value && item.task === "text") ? "chat" : "studio"); break;
     case "findText": filter = "text"; switchView("models"); break;
     case "chatSend": sendChat(); break;
+    case "devicePanel":
+      document.querySelectorAll("[data-device-panel]").forEach(panel => { panel.hidden = panel.dataset.devicePanel !== value; });
+      document.querySelectorAll('[data-action="devicePanel"]').forEach(button => {
+        button.setAttribute("aria-pressed", String(button.dataset.value === value));
+      });
+      break;
     case "clearActivity": if (window.confirm(t("activityConfirm"))) bridge?.clearActivity(); break;
     case "checkUpdate": bridge?.checkUpdate(); break;
     case "installUpdate": bridge?.installUpdate(); break;

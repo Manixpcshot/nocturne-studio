@@ -217,3 +217,7 @@ body { display: grid; min-height: 0; grid-template: "top" auto "activity" auto "
 .activity-record { display: flex; gap: 8px; justify-content: space-between; padding-block: 7px; border-bottom: 1px solid var(--edge); }
 .activity-record :is(small,time) { display: block; font-size: .72rem; color: var(--muted); }
 .activity-record[data-phase="error"] small { color: #ff9eaa; }
+
+.device-tabs { display: flex; flex-wrap: wrap; gap: 6px; margin-block: 10px; }
+.device-tabs [aria-pressed="true"] { border: 1px solid var(--accent); color: var(--accent); }
+[data-device-panel][hidden] { display: none; }

@@ -119,6 +119,12 @@ def emit_event(event, data):
 TRANSFER_LIMIT = threading.local()
 
 
+def work_progress(phase):
+    # Website generation runs on its own thread and reports its own result.
+    if threading.current_thread() is threading.main_thread():
+        emit_event("work-progress", {"phase": phase})
+
+
 def emit_progress(data):
     if data.get("phase") == "retrying":
         data.setdefault("retry_in", min(max(1, data.get("attempt", 2) - 1) * 3, 20))
@@ -556,6 +562,7 @@ def requires_sdnq(folder):
 
 
 def load_model(model_id, kind="image"):
+    work_progress("loading")
     global pipe, active_model, active_kind
     if kind == "sdcpp":
         installed = sdcpp_models().get(model_id)
@@ -719,12 +726,14 @@ def create_image(pipeline, model_id, translated, device, include_image=True, ori
     import torch
     if device.startswith("cuda"):
         torch.cuda.empty_cache()
+    work_progress("generating")
     with torch.inference_mode(), contextlib.redirect_stdout(sys.stderr):
         image = pipeline(prompt=translated, **image_settings(pipeline, model_id, aspect_ratio)).images[0]
     if all(high <= 1 for low, high in image.convert("RGB").getextrema()):
         raise RuntimeError("خروجی مدل کاملاً سیاه شد. یک پرامپت دیگر یا مدل دیگری را امتحان کنید.")
     filename = filename or f"image_{datetime.now():%Y%m%d_%H%M%S_%f}.png"
     staged, image_path = image_paths(temporary, filename)
+    work_progress("saving")
     image.save(staged)
     commit_image(staged, image_path, translated, original_prompt, model_id, aspect_ratio, metadata)
     result = {"name": filename, "translated": translated, "model": model_id, "temporary": temporary}
@@ -884,6 +893,7 @@ def generate_sdcpp(prompt, translated_override=None, warning_override=False, inc
     env = os.environ.copy()
     env["PATH"] = str(engine.parent) + os.pathsep + env.get("PATH", "")
     creationflags = 0x08000000 if os.name == "nt" else 0
+    work_progress("generating")
     completed = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                text=True, encoding="utf-8", errors="replace", env=env,
                                creationflags=creationflags, timeout=3600)
@@ -1178,12 +1188,14 @@ def generate_video(prompt, reference="", metadata=None, filename=None):
             settings["image"] = ImageOps.exif_transpose(source).convert("RGB")
     elif image_param is not None and image_param.default is inspect.Parameter.empty:
         raise RuntimeError("این مدل به عکس مرجع نیاز دارد.")
+    work_progress("generating")
     with torch.inference_mode(), contextlib.redirect_stdout(sys.stderr):
         frames = pipe(prompt=translated, **settings).frames[0]
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     filename = filename or f"video_{datetime.now():%Y%m%d_%H%M%S_%f}.mp4"
     staged, target = image_paths(False, filename)
     try:
+        work_progress("saving")
         export_to_video(frames, str(staged), fps=fps)
         commit_image(staged, target, translated, prompt, active_model, "", metadata)
     finally:
@@ -2535,6 +2547,7 @@ def qwen_tts_download(model_id, revision=None):
 
 
 def tts_generate(model_id, text):
+    work_progress("generating")
     if not text.strip() or len(text) > 500:
         raise RuntimeError("متن صدا باید بین ۱ تا ۵۰۰ نویسه باشد.")
     if model_id in PIPER_VOICES:

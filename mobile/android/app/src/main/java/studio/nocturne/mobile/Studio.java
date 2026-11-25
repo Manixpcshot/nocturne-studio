@@ -229,6 +229,9 @@ final class Studio {
             try {
                 ModelDownload.run(model, models, (phase, received, rate, component) -> main.post(() -> {
                     if (control != transfer || control.paused()) return;
+                    if ("retrying".equals(phase) && !"retrying".equals(download.optString("phase"))) {
+                        record("downloads", "retry", "network");
+                    }
                     download = json("id", id, "phase", phase, "received", received, "rate", rate,
                             "component", component);
                     changed();

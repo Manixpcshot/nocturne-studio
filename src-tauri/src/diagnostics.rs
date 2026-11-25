@@ -20,6 +20,8 @@ pub struct Entry {
     code: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     elapsed_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    operation: Option<String>,
 }
 
 pub fn area(action: &str) -> Option<&'static str> {
@@ -104,12 +106,69 @@ fn read(directory: &Path) -> io::Result<Vec<Entry>> {
     Ok(result)
 }
 
+pub struct Operation {
+    id: String,
+    action: String,
+    start: Instant,
+    stages: std::collections::HashSet<(&'static str, u64)>,
+}
+
+impl Operation {
+    pub fn begin(app: &AppHandle, action: &str) -> Self {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let id = format!("{:x}-{:x}-{:x}", now(), std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed));
+        let task = Self { id, action: action.into(), start: Instant::now(), stages: Default::default() };
+        write(app, action, "started", None, None, Some(&task.id));
+        task
+    }
+
+    pub fn progress(&mut self, app: &AppHandle, event: &str, data: &serde_json::Value) {
+        let Some((stage, attempt)) = progress_stage(event, data) else { return; };
+        if self.stages.len() >= 32 || !self.stages.insert((stage, attempt)) { return; }
+        write(app, &self.action, if stage == "retrying" { "retry" } else { "progress" },
+            Some(stage), Some(self.start), Some(&self.id));
+    }
+
+    pub fn finish(&self, app: &AppHandle, result: &Result<serde_json::Value, String>, cancelled: bool) {
+        let (phase, code) = result_status(result, cancelled);
+        write(app, &self.action, phase, code, Some(self.start), Some(&self.id));
+    }
+}
+
+fn progress_stage(event: &str, data: &serde_json::Value) -> Option<(&'static str, u64)> {
+    let stage = match (event, data["phase"].as_str().unwrap_or("")) {
+        ("download-progress", "checking") | ("work-progress", "checking") => "checking",
+        ("download-progress", "starting" | "transferring") | ("chat-progress", _) => "transferring",
+        ("download-progress", "resuming") => "resuming",
+        ("download-progress", "retrying") => "retrying",
+        ("download-progress", "verifying") => "verifying",
+        ("download-progress", "installing") => "installing",
+        ("queue-progress", "loading") | ("work-progress", "loading") => "loading",
+        ("queue-progress", "generating") | ("batch-progress" | "chat-token", _) |
+        ("work-progress", "generating") => "generating",
+        ("chat-agent-step", _) => "planning",
+        ("work-progress", "saving") => "saving",
+        _ => return None,
+    };
+    Some((stage, if stage == "retrying" { data["attempt"].as_u64().unwrap_or(0) } else { 0 }))
+}
+
+fn now() -> u64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64
+}
+
 pub fn record(app: &AppHandle, action: &str, phase: &'static str, code: Option<&'static str>, start: Option<Instant>) {
+    write(app, action, phase, code, start, None);
+}
+
+fn write(app: &AppHandle, action: &str, phase: &str, code: Option<&str>, start: Option<Instant>, operation: Option<&str>) {
     let Some(area) = area(action) else { return; };
     let entry = Entry {
-        time: SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64,
+        time: now(),
         area: area.into(), action: action.into(), phase: phase.into(), code: code.map(String::from),
         elapsed_ms: start.map(|instant| instant.elapsed().as_millis() as u64),
+        operation: operation.map(String::from),
     };
     let Ok(directory) = app.path().app_log_dir() else { return; };
     let Ok(lock) = FILES.lock() else { return; };
@@ -121,17 +180,19 @@ pub fn record(app: &AppHandle, action: &str, phase: &'static str, code: Option<&
 }
 
 pub fn outcome(app: &AppHandle, action: &str, result: &Result<serde_json::Value, String>, start: Instant, cancelled: bool) {
-    if cancelled {
-        record(app, action, "cancelled", None, Some(start));
-        return;
-    }
+    let (phase, code) = result_status(result, cancelled);
+    record(app, action, phase, code, Some(start));
+}
+
+fn result_status(result: &Result<serde_json::Value, String>, cancelled: bool) -> (&'static str, Option<&'static str>) {
+    if cancelled { return ("cancelled", None); }
     let code = match result {
         Err(error) => Some(error_code(error, None)),
         Ok(value) if value["ok"] == false =>
             Some(error_code(value["error"].as_str().unwrap_or(""), value["error_kind"].as_str())),
         _ => None,
     };
-    record(app, action, if code.is_some() { "error" } else { "success" }, code, Some(start));
+    (if code.is_some() { "error" } else { "success" }, code)
 }
 
 #[tauri::command]
@@ -176,6 +237,13 @@ mod tests {
     }
 
     #[test]
+    fn progress_ignores_raw_details_and_bounds_duplicates() {
+        let event = serde_json::json!({"phase":"retrying", "attempt":3, "file":"private filename"});
+        assert_eq!(progress_stage("download-progress", &event), Some(("retrying", 3)));
+        assert_eq!(progress_stage("work-progress", &serde_json::json!({"phase":"arbitrary"})), None);
+    }
+
+    #[test]
     fn rotates_and_ignores_incomplete_lines() {
         let directory = std::env::temp_dir().join(format!("nocturne-activity-test-{}", std::process::id()));
         fs::create_dir_all(&directory).unwrap();
@@ -183,7 +251,7 @@ mod tests {
         fs::write(&current, vec![b' '; MAX_BYTES as usize]).unwrap();
         append(&directory, &Entry {
             time: 123, area: "system".into(), action: "startup".into(), phase: "success".into(),
-            code: None, elapsed_ms: None,
+            code: None, elapsed_ms: None, operation: None,
         }).unwrap();
         assert!(previous.is_file());
         assert_eq!(read(&directory).unwrap().len(), 1);

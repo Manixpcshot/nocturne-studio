@@ -27,3 +27,9 @@
 .studio-dock span { color: var(--quiet); font-size: .75rem; }
 .studio-dock strong { overflow-wrap: anywhere; color: var(--ink); font-size: .95rem; }
 .studio-shortcuts { display: flex; flex-wrap: wrap; gap: 5px; }
+
+.activity-summary { display: flex; gap: 7px; flex-wrap: wrap; margin-block: 10px; }
+.activity-summary [aria-pressed="true"] { color: var(--accent); border-color: var(--accent); }
+.activity-trace { margin-inline-start: 8px; font-size: .7rem; }
+.activity-entry[data-phase="retry"] .activity-state { color: #eab97e; }
+#activity-all-tasks[hidden] { display: none; }

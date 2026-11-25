@@ -2,9 +2,15 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import './activity.css';
 
-type Entry = { time: number; area: string; action: string; phase: string; code?: string; elapsed_ms?: number };
+type Entry = { time: number; area: string; action: string; phase: string; code?: string; elapsed_ms?: number; operation?: string };
 type Labels = Record<string, readonly [string, string]>;
 const labels: Labels = {
+  progress: ['In progress','در حال انجام'], retry: ['Retry','تلاش دوباره'],
+  checking: ['Checking','بررسی اولیه'], transferring: ['Receiving files','دریافت فایل‌ها'],
+  resuming: ['Resuming transfer','ادامهٔ دانلود'], retrying: ['Reconnecting','اتصال دوباره'],
+  verifying: ['Verifying files','بررسی صحت فایل‌ها'], installing: ['Installing','نصب موتور'],
+  loading: ['Loading model','بارگذاری مدل'], generating: ['Generating','تولید خروجی'],
+  planning: ['Planning','برنامه‌ریزی'], saving: ['Saving','ذخیره'],
   image: ['Image', 'تصویر'], video: ['Video', 'ویدیو'], voice: ['Speech', 'صدا'], chat: ['Chat', 'چت'],
   queue: ['Queue', 'صف'], downloads: ['Downloads', 'دانلودها'], models: ['Models', 'مدل‌ها'], gallery: ['Gallery', 'گالری'],
   storage: ['Storage', 'فضای ذخیره‌سازی'], website: ['Website', 'وب‌سایت'], system: ['System', 'سیستم'],
@@ -30,7 +36,7 @@ export const activityPage = '<section class="view" id="activity-view"></section>
 
 export function mountActivity(en: () => boolean) {
   const view = document.querySelector<HTMLElement>('#activity-view')!;
-  view.innerHTML = '<header class="section-head"><h1></h1><p></p></header><div class="activity-tools"><input id="activity-query" type="search" dir="auto"><select id="activity-area"></select><select id="activity-phase"></select><button class="small-button" id="activity-refresh"></button><button class="small-button" id="activity-export"></button><button class="small-button" id="activity-clear"></button></div><p class="activity-message" role="status"></p><ol class="activity-list"></ol>';
+  view.innerHTML = '<header class="section-head"><h1></h1><p></p></header><div class="activity-tools"><input id="activity-query" type="search" dir="auto"><select id="activity-area"></select><select id="activity-phase"></select><button class="small-button" id="activity-refresh"></button><button class="small-button" id="activity-export"></button><button class="small-button" id="activity-clear"></button></div><div class="activity-summary"></div><button type="button" id="activity-all-tasks" class="small-button" hidden></button><p class="activity-message" role="status"></p><ol class="activity-list"></ol>';
   const query = view.querySelector<HTMLInputElement>('#activity-query')!;
   const area = view.querySelector<HTMLSelectElement>('#activity-area')!;
   const phase = view.querySelector<HTMLSelectElement>('#activity-phase')!;
@@ -46,10 +52,22 @@ export function mountActivity(en: () => boolean) {
   let timer = 0;
   let revision = 0;
   let locale = '';
+  let operation = '';
+  const summary = view.querySelector('.activity-summary')!;
+  const all = view.querySelector<HTMLButtonElement>('#activity-all-tasks')!;
+  all.onclick = () => { operation = ''; draw(); };
+
+  function scope(section = '') {
+    operation = '';
+    query.value = '';
+    phase.value = '';
+    area.value = section;
+    draw();
+  }
 
   function draw() {
     const needle = query.value.trim().toLowerCase();
-    visible = entries.filter(row => (!area.value || area.value === row.area) &&
+    visible = entries.filter(row => (!operation || row.operation === operation) && (!area.value || area.value === row.area) &&
       (!phase.value || phase.value === row.phase) && (!needle ||
       [row.action, label(row.action), label(row.area), label(row.code || '')].some(value => value.toLowerCase().includes(needle))));
     const time = new Intl.DateTimeFormat(en() ? 'en' : 'fa', { dateStyle: 'short', timeStyle: 'medium' });
@@ -70,12 +88,35 @@ export function mountActivity(en: () => boolean) {
       when.textContent = time.format(row.time) + (row.elapsed_ms != null ? ' · ' +
         new Intl.NumberFormat(en() ? 'en' : 'fa', { maximumFractionDigits: 1 }).format(row.elapsed_ms / 1000) +
         tr(' s', ' ثانیه') : '');
+      if (row.operation && !operation) {
+        const trace = document.createElement('button');
+        trace.type = 'button';
+        trace.className = 'small-button activity-trace';
+        trace.textContent = tr('Task history', 'مراحل کار');
+        trace.onclick = () => {
+          scope();
+          operation = row.operation!;
+          draw();
+        };
+        details.append(trace);
+      }
       item.append(state, details, when);
       return item;
     }));
     message.textContent = visible.length
       ? tr(visible.length + ' matching entries', visible.length.toLocaleString('fa') + ' رویداد')
       : tr('No matching activity.', 'رویدادی پیدا نشد.');
+    all.hidden = !operation;
+    all.textContent = tr('Back to all tasks', 'بازگشت به همهٔ کارها');
+    summary.replaceChildren(...['success','error','retry'].map(key => {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'small-button';
+      button.textContent = label(key) + ' · ' + entries.filter(row => row.phase === key).length.toLocaleString(en() ? 'en' : 'fa');
+      button.setAttribute('aria-pressed', String(phase.value === key));
+      button.onclick = () => { operation = ''; phase.value = phase.value === key ? '' : key; draw(); };
+      return button;
+    }));
     exportButton.disabled = !visible.length;
     clear.disabled = !entries.length;
   }
@@ -92,7 +133,7 @@ export function mountActivity(en: () => boolean) {
     query.setAttribute('aria-label', query.placeholder);
     for (const [select, options, text] of [
       [area, ['image','video','voice','chat','queue','downloads','models','gallery','storage','website','system'], tr('All sections','همهٔ بخش‌ها')],
-      [phase, ['started','success','error','cancelled'], tr('All statuses','همهٔ وضعیت‌ها')],
+      [phase, ['started','progress','retry','success','error','cancelled'], tr('All statuses','همهٔ وضعیت‌ها')],
     ] as const) {
       const previous = select.value;
       select.setAttribute('aria-label', text);
@@ -121,7 +162,7 @@ export function mountActivity(en: () => boolean) {
   refreshButton.onclick = () => void refresh();
   clear.onclick = async () => {
     if (!window.confirm(tr('Clear all saved activity records?', 'همهٔ رویدادهای ذخیره‌شده پاک شوند؟'))) return;
-    try { await invoke('activity_clear'); await refresh(); }
+    try { await invoke('activity_clear'); scope(); await refresh(); }
     catch { message.textContent = tr('The activity log could not be cleared.', 'پاک کردن گزارش ممکن نشد.'); }
   };
   exportButton.onclick = () => {
@@ -138,5 +179,5 @@ export function mountActivity(en: () => boolean) {
     timer = window.setTimeout(() => void refresh(), 130);
   }).catch(() => {});
   localize();
-  return { localize, refresh };
+  return { localize, refresh, scope };
 }

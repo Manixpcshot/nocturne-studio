@@ -83,12 +83,22 @@
     <section id="device" class="screen" hidden>
       <div class="title-row"><h1 data-text="device">Device</h1><button class="quiet" data-action="refresh" data-text="refresh">Refresh</button></div>
       <p class="lead" data-text="deviceIntro">Hardware and capacity reported by Android.</p>
+      <div class="device-tabs" role="group">
+        <button class="quiet" data-action="devicePanel" data-value="hardware" data-text="deviceHardware" aria-pressed="true">Hardware</button>
+        <button class="quiet" data-action="devicePanel" data-value="updates" data-text="appUpdates" aria-pressed="false">Updates</button>
+        <button class="quiet" data-action="devicePanel" data-value="activity" data-text="activityTitle" aria-pressed="false">Activity log</button>
+      </div>
+      <div data-device-panel="hardware">
       <div id="device-details"></div>
-      <h2 class="section-title" data-text="appUpdates">App updates</h2>
-      <div id="update-card" class="composer"></div>
       <h2 class="section-title" data-text="engine">Image engine</h2>
       <div id="engine-list" class="engine-list"></div>
-      <details class="composer device-activity"><summary data-text="activityTitle">Activity log</summary>
+      </div>
+      <div data-device-panel="updates" hidden>
+      <h2 class="section-title" data-text="appUpdates">App updates</h2>
+      <div id="update-card" class="composer"></div>
+      </div>
+      <div data-device-panel="activity" hidden>
+      <details class="composer device-activity" open><summary data-text="activityTitle">Activity log</summary>
         <div class="activity-tools">
           <select id="activity-filter" aria-label="Activity status">
             <option value="" data-text="activityAll">All statuses</option>
@@ -98,6 +108,7 @@
         </div>
         <div id="device-activity"></div>
       </details>
+      </div>
     </section>
   </main>
   <nav class="nav" id="nav" aria-label="Nocturne"></nav>

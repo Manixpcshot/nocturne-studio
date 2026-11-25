@@ -292,6 +292,7 @@ struct Backend {
     child: Child,
     stdin: ChildStdin,
     responses: std::sync::mpsc::Receiver<Result<Value, String>>,
+    operation: Arc<Mutex<Option<diagnostics::Operation>>>,
 }
 
 struct DownloadState {
@@ -393,6 +394,8 @@ fn start_backend(app: &AppHandle) -> Result<Backend, String> {
     let stdin = child.stdin.take().ok_or("ورودی موتور پیدا نشد")?;
     let stdout = child.stdout.take().ok_or("خروجی موتور پیدا نشد")?;
     let (sender, responses) = std::sync::mpsc::channel();
+    let operation = Arc::new(Mutex::new(None::<diagnostics::Operation>));
+    let current_operation = Arc::clone(&operation);
     let app = app.clone();
     std::thread::spawn(move || {
         for line in BufReader::new(stdout).lines() {
@@ -409,8 +412,13 @@ fn start_backend(app: &AppHandle) -> Result<Backend, String> {
                         continue;
                     }
                     if matches!(event, "download-progress" | "batch-progress" | "queue-progress" |
-                        "chat-progress" | "chat-token" | "chat-agent-step") {
-                        let _ = app.emit(event, &value["data"]);
+                        "chat-progress" | "chat-token" | "chat-agent-step" | "work-progress") {
+                        if let Ok(mut current) = current_operation.lock() {
+                            if let Some(operation) = current.as_mut() {
+                                operation.progress(&app, event, &value["data"]);
+                            }
+                        }
+                        if event != "work-progress" { let _ = app.emit(event, &value["data"]); }
                         continue;
                     }
                 }
@@ -419,7 +427,7 @@ fn start_backend(app: &AppHandle) -> Result<Backend, String> {
             if sender.send(response).is_err() || invalid { break; }
         }
     });
-    Ok(Backend { child, stdin, responses })
+    Ok(Backend { child, stdin, responses, operation })
 }
 
 fn save_folder(app: &AppHandle, state: State<'_, Arc<Mutex<Option<Backend>>>>, path: String, key: &str, restart: bool) -> Result<(), String> {
@@ -469,6 +477,21 @@ fn send_backend_request(backend: &mut Backend, action: &str, payload: Value) -> 
     backend.responses.recv().map_err(|_| "موتور Python بسته شد.".to_string())?
 }
 
+fn run_with_progress(
+    backend: &mut Backend, task: &mut Option<diagnostics::Operation>, action: &str, payload: Value,
+) -> Result<Value, String> {
+    {
+        let mut slot = backend.operation.lock().map_err(|error| error.to_string())?;
+        *slot = task.take();
+    }
+    let result = send_backend_request(backend, action, payload);
+    {
+        let mut slot = backend.operation.lock().map_err(|error| error.to_string())?;
+        *task = slot.take();
+    }
+    result
+}
+
 #[tauri::command]
 async fn model_download(
     app: AppHandle,
@@ -490,20 +513,19 @@ async fn model_download(
         jobs.insert(job_id.clone(), Arc::clone(&worker));
     }
     tauri::async_runtime::spawn_blocking(move || {
-        let started = Instant::now();
-        diagnostics::record(&app, &action, "started", None, None);
+        let mut operation = Some(diagnostics::Operation::begin(&app, &action));
         let result = (|| {
             let mut backend = start_backend(&app)?;
             worker.pid.store(backend.child.id(), Ordering::SeqCst);
             worker.active.store(true, Ordering::SeqCst);
-            send_backend_request(&mut backend, &action, payload)
+            run_with_progress(&mut backend, &mut operation, &action, payload)
         })();
         worker.finish();
         if let Ok(mut jobs) = workers.lock() {
             jobs.remove(&job_id);
         }
         let cancelled = worker.cancelled.swap(false, Ordering::SeqCst) && result.is_err();
-        diagnostics::outcome(&app, &action, &result, started, cancelled);
+        if let Some(operation) = operation { operation.finish(&app, &result, cancelled); }
         if cancelled {
             return Err("Download paused; received files were kept.".into());
         }
@@ -531,8 +553,7 @@ async fn backend_command(
     let state = Arc::clone(&state);
     let download = Arc::clone(&download);
     tauri::async_runtime::spawn_blocking(move || {
-    let started = Instant::now();
-    diagnostics::record(&app, &action, "started", None, None);
+    let mut operation = Some(diagnostics::Operation::begin(&app, &action));
     let mut cancelled = false;
     let outcome = (|| {
     let mut guard = state.lock().map_err(|_| "موتور برنامه در دسترس نیست".to_string())?;
@@ -546,7 +567,7 @@ async fn backend_command(
         download.pid.store(backend.child.id(), Ordering::SeqCst);
         download.active.store(true, Ordering::SeqCst);
     }
-    let outcome = send_backend_request(backend, &action, payload);
+    let outcome = run_with_progress(backend, &mut operation, &action, payload);
     if is_download {
         download.finish();
     }
@@ -559,7 +580,7 @@ async fn backend_command(
     }
     outcome
     })();
-    diagnostics::outcome(&app, &action, &outcome, started, cancelled);
+    if let Some(operation) = operation { operation.finish(&app, &outcome, cancelled); }
     outcome
     }).await.map_err(|e| format!("فرمان برنامه متوقف شد: {e}"))?
 }

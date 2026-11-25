@@ -673,7 +673,7 @@ function render() {
           <div class="top-actions">
             <button type="button" id="workspace-command-open" class="small-button">${icon('Search', 15)}<span>رفتن به بخش</span><kbd dir="ltr">Ctrl K</kbd></button>
             <button type="button" id="workspace-settings-open" class="icon-button" aria-label="تنظیمات" title="تنظیمات">${icon('Settings', 16)}</button>
-            <span id="work-status" role="status"><span class="status-dot"></span>در حال آماده‌سازی...</span>
+            <span id="work-status" role="status"><span class="status-dot"></span>در حال آماده‌سازی...</span><button type="button" id="activity-shortcut" class="icon-button" title="گزارش فعالیت" aria-label="گزارش فعالیت">${icon("Layers", 16)}</button>
           </div>
         </header>
         ${activityPage}
@@ -702,6 +702,13 @@ function render() {
   attachEvents();
   mountProjectControls();
   activity = mountActivity(() => language === 'en');
+  document.querySelector<HTMLButtonElement>('#activity-shortcut')!.onclick = () => {
+    const current = document.querySelector<HTMLElement>('main .view.active')?.id.replace(/-view$/, '') || '';
+    const areas: Record<string, string> = { studio: 'image', video: 'video', voice: 'voice', batch: 'queue',
+      chat: 'chat', models: 'models', gallery: 'gallery', 'audio-gallery': 'voice', website: 'website' };
+    activity?.scope(areas[current] || '');
+    setView('activity');
+  };
   mixedRefresh = mountMixedQueue(document.querySelector('#batch-view')!, {
     key: () => scopedKey('nocturne-mixed-queue'), en: () => language === 'en', busy: () => busy,
     folder: () => outputFolder,
@@ -765,6 +772,8 @@ function openWorkspace(view: string) {
   else setView(view);
 }
 
+const workspaceScroll = new Map<string, number>();
+
 function setView(view: string) {
   const info = pageInfo(view);
   if (!info) return;
@@ -772,11 +781,14 @@ function setView(view: string) {
   const target = document.getElementById(`${view}-view`);
   if (!target) return;
   const changed = !target.classList.contains('active');
+  const surface = document.querySelector<HTMLElement>('.main')!;
+  const previous = surface.querySelector<HTMLElement>(':scope > .view.active');
+  if (changed && previous) workspaceScroll.set(previous.id, surface.scrollTop);
   document.querySelectorAll('.view').forEach(el => el.classList.remove('active'));
   target.classList.add('active');
   if (changed) {
     navigationRevision++;
-    document.querySelector('.main')!.scrollTop = 0;
+    surface.scrollTop = workspaceScroll.get(target.id) || 0;
   }
   rememberPage(view);
   document.querySelectorAll<HTMLButtonElement>('.nav-item').forEach(button => {
