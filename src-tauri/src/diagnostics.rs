@@ -37,7 +37,7 @@ pub fn area(action: &str) -> Option<&'static str> {
         "storage" | "set_output_folder" | "set_model_folder" => "storage",
         "web_start" | "web_stop" | "web_public_start" | "web_public_stop" | "web_create_user" |
         "web_set_password" | "web_revoke_user" | "web_settings" | "web_generate" => "website",
-        "startup" | "setup_install" | "update_diffusers_engine" | "install_app_update" |
+        "startup" | "setup_install" | "update_diffusers_engine" | "check_app_update" | "install_app_update" |
         "python_runtime" | "interface" => "system",
         _ => return None,
     })

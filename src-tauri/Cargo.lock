@@ -2224,7 +2224,7 @@ dependencies = [
 
 [[package]]
 name = "nocturne-studio"
-version = "2.9.1"
+version = "2.9.2"
 dependencies = [
  "serde",
  "serde_json",
