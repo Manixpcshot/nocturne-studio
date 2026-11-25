@@ -42,6 +42,8 @@ SUPPORTED_VIDEO_CLASSES = {
     "CogVideoXPipeline", "WanPipeline", "LTXPipeline", "MochiPipeline",
     "HunyuanVideoPipeline", "AllegroPipeline", "HunyuanVideo15Pipeline",
     "LTX2Pipeline", "CosmosTextToWorldPipeline", "Cosmos2_5_PredictBasePipeline",
+    "CogVideoXImageToVideoPipeline", "WanImageToVideoPipeline", "LTXImageToVideoPipeline",
+    "HunyuanVideoImageToVideoPipeline", "HunyuanVideo15ImageToVideoPipeline",
 }
 OUTPUT_DIR = Path(os.environ.get("NOCTURNE_IMAGES_DIR", "generated_images"))
 TEMP_IMAGES = Path(tempfile.mkdtemp(prefix="nocturne-images-"))
@@ -55,6 +57,7 @@ WEB_TUNNEL_URL = ""
 WEB_TUNNEL_CONNECTED = False
 WEB_TUNNEL_ERROR = ""
 WEB_SESSIONS = {}
+WEB_PROGRESS = {}
 WEB_LOGIN_ATTEMPTS = {}
 ORIGINAL_HF_HOME = Path(os.environ.get("NOCTURNE_ORIGINAL_HF_HOME", str(Path.home() / ".cache/huggingface")))
 MODEL_HOME = Path(os.environ.get("HF_HOME", str(ORIGINAL_HF_HOME)))
@@ -730,7 +733,7 @@ def create_image(pipeline, model_id, translated, device, include_image=True, ori
     return result
 
 
-def generate(prompt, translated_override=None, warning_override=False, include_image=True, aspect_ratio="1:1", temporary=False, metadata=None):
+def generate(prompt, translated_override=None, warning_override=False, include_image=True, aspect_ratio="1:1", temporary=False, metadata=None, filename=None):
     import torch
     if pipe is None or active_kind not in ("image", "checkpoint"):
         raise RuntimeError("اول یک مدل را انتخاب کنید.")
@@ -739,7 +742,7 @@ def generate(prompt, translated_override=None, warning_override=False, include_i
         raise RuntimeError("پرامپت خالی است.")
     if re.search(r"flux(?:fill|control|kontext)", type(pipe).__name__.lower()):
         raise RuntimeError("Open Edit and attach the required reference image for this FLUX model.")
-    result = create_image(pipe, active_model, translated, selected_device, include_image, original_prompt=prompt, aspect_ratio=aspect_ratio, temporary=temporary, metadata=metadata)
+    result = create_image(pipe, active_model, translated, selected_device, include_image, original_prompt=prompt, aspect_ratio=aspect_ratio, temporary=temporary, metadata=metadata, filename=filename)
     result["translation_warning"] = translation_warning
     return result
 
@@ -1147,7 +1150,18 @@ def video_settings(pipeline):
     return settings, fps
 
 
-def generate_video(prompt):
+def media_reference(name):
+    if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9_.-]+\.png", name, re.IGNORECASE):
+        raise ValueError("Invalid reference image name.")
+    for folder in (OUTPUT_DIR, TEMP_IMAGES):
+        root = folder.resolve()
+        path = root / name
+        if path.is_file() and path.resolve().parent == root:
+            return path
+    raise FileNotFoundError("عکس مرجع پیدا نشد.")
+
+
+def generate_video(prompt, reference="", metadata=None, filename=None):
     import torch
     from diffusers.utils import export_to_video
     if pipe is None or active_kind != "video":
@@ -1156,18 +1170,40 @@ def generate_video(prompt):
     if not translated:
         raise RuntimeError("پرامپت خالی است.")
     settings, fps = video_settings(pipe)
+    image_param = inspect.signature(pipe.__call__).parameters.get("image")
+    if reference:
+        if image_param is None:
+            raise RuntimeError("این مدل ورودی عکس ندارد. یک مدل Image-to-Video انتخاب کن.")
+        with Image.open(media_reference(reference)) as source:
+            settings["image"] = ImageOps.exif_transpose(source).convert("RGB")
+    elif image_param is not None and image_param.default is inspect.Parameter.empty:
+        raise RuntimeError("این مدل به عکس مرجع نیاز دارد.")
     with torch.inference_mode(), contextlib.redirect_stdout(sys.stderr):
         frames = pipe(prompt=translated, **settings).frames[0]
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    filename = f"video_{datetime.now():%Y%m%d_%H%M%S_%f}.mp4"
-    export_to_video(frames, str(OUTPUT_DIR / filename), fps=fps)
+    filename = filename or f"video_{datetime.now():%Y%m%d_%H%M%S_%f}.mp4"
+    staged, target = image_paths(False, filename)
+    try:
+        export_to_video(frames, str(staged), fps=fps)
+        commit_image(staged, target, translated, prompt, active_model, "", metadata)
+    finally:
+        staged.unlink(missing_ok=True)
     return {"name": filename, "translated": translated, "translation_warning": translation_warning}
+
+
+def output_metadata(path):
+    try:
+        data = json.loads(path.with_suffix(".json").read_text(encoding="utf-8"))
+        return {"project_id": data.get("project_id", ""), "parent_image": data.get("parent_image", "")}
+    except (OSError, ValueError, AttributeError):
+        return {"project_id": "", "parent_image": ""}
 
 
 def video_gallery():
     if not OUTPUT_DIR.exists():
         return []
-    return [{"name": p.name, "date": datetime.fromtimestamp(p.stat().st_mtime).isoformat()} for p in sorted(OUTPUT_DIR.glob("*.mp4"), key=lambda p: p.stat().st_mtime, reverse=True)[:120]]
+    return [{"name": p.name, "date": datetime.fromtimestamp(p.stat().st_mtime).isoformat(), **output_metadata(p)}
+            for p in sorted(OUTPUT_DIR.glob("*.mp4"), key=lambda p: p.stat().st_mtime, reverse=True)]
 
 
 def video_data(name):
@@ -1178,27 +1214,126 @@ def video_data(name):
 
 
 def storage_info():
-    model_bytes = 0
-    seen = set()
+    rows, seen = [], set()
     for folder in (ORIGINAL_HF_HOME / "hub", MODEL_CACHE):
         resolved = folder.resolve()
         if resolved in seen or not folder.is_dir():
             continue
         seen.add(resolved)
         try:
-            model_bytes += scan_cache_dir(cache_dir=folder).size_on_disk
-        except Exception:
+            for repo in scan_cache_dir(cache_dir=folder).repos:
+                rows.append({"name": repo.repo_id, "category": "model", "bytes": repo.size_on_disk,
+                             "users": len(repo.revisions)})
+        except (OSError, ValueError):
             pass
-    if SDCPP_ROOT.is_dir():
-        model_bytes += sum(p.stat().st_size for p in SDCPP_ROOT.rglob("*") if p.is_file())
-    if CHECKPOINT_ROOT.is_dir():
-        model_bytes += sum(p.stat().st_size for p in CHECKPOINT_ROOT.rglob("*") if p.is_file())
-    images = list(OUTPUT_DIR.glob("*.png")) if OUTPUT_DIR.is_dir() else []
-    videos = list(OUTPUT_DIR.glob("*.mp4")) if OUTPUT_DIR.is_dir() else []
-    return {"model_bytes": model_bytes,
+    groups = {
+        "model": (SDCPP_ROOT / "weights", CHECKPOINT_ROOT, MODEL_HOME / "nocturne-chat/models"),
+        "engine": (SDCPP_ROOT / "engine", MODEL_HOME / "nocturne-chat/engine",
+                   MODEL_HOME / "nocturne-chat/llama/engines", MODEL_HOME / "nocturne-qwen-runtime"),
+        "partial": (MODEL_CACHE / ".nocturne-parts",),
+    }
+    shared = {}
+    for manifest in (SDCPP_ROOT / "models").glob("*/manifest.json"):
+        try:
+            record = json.loads(manifest.read_text(encoding="utf-8"))
+            for path in record.get("weights", {}).values():
+                shared.setdefault(str(Path(path).resolve()), set()).add(record["id"])
+        except (OSError, ValueError, TypeError, KeyError, AttributeError):
+            continue
+
+    def collect(folder, category):
+        size, users = 0, set()
+        for path in ([folder] if folder.is_file() else folder.rglob("*")):
+            try:
+                if path.is_symlink() or not path.is_file():
+                    continue
+                resolved = str(path.resolve())
+                if resolved in seen:
+                    continue
+                seen.add(resolved)
+                weight_size = path.stat().st_size
+                if path.name.endswith((".part", ".incomplete")) and category != "partial":
+                    rows.append({"name": path.name, "category": "partial", "bytes": weight_size, "users": 0})
+                    continue
+                size += weight_size
+                users.update(shared.get(resolved, set()))
+            except OSError:
+                continue
+        if size:
+            rows.append({"name": folder.name, "category": category, "bytes": size, "users": len(users), "dependents": sorted(users)})
+
+    for category, roots in groups.items():
+        for root in roots:
+            for entry in root.iterdir() if root.is_dir() else ():
+                collect(entry, category)
+    for cache in (ORIGINAL_HF_HOME / "hub", MODEL_CACHE):
+        for partial in cache.glob("models--*/blobs/*.incomplete"):
+            collect(partial, "partial")
+    for part in (MODEL_HOME / "nocturne-chat").glob("*.part"):
+        collect(part, "partial")
+
+    images = list(OUTPUT_DIR.glob("*.png"))
+    videos = list(OUTPUT_DIR.glob("*.mp4"))
+    audio = list((OUTPUT_DIR / "audio").glob("*.wav"))
+    return {"model_bytes": sum(row["bytes"] for row in rows if row["category"] == "model"),
             "image_bytes": sum(p.stat().st_size for p in images), "image_count": len(images),
             "video_bytes": sum(p.stat().st_size for p in videos), "video_count": len(videos),
+            "audio_bytes": sum(p.stat().st_size for p in audio), "audio_count": len(audio),
+            "rows": sorted(rows, key=lambda row: row["bytes"], reverse=True),
+            "disk_free": shutil.disk_usage(nearest_storage_folder(MODEL_HOME)).free,
             "output_folder": str(OUTPUT_DIR)}
+
+
+def nearest_storage_folder(folder):
+    while not folder.is_dir() and folder != folder.parent:
+        folder = folder.parent
+    return folder
+
+
+def media_workflow_job(payload):
+    job_id, kind = payload["id"], payload["kind"]
+    if not isinstance(job_id, str) or not re.fullmatch(r"[a-f0-9]{32}", job_id):
+        raise ValueError("Invalid job ID.")
+    if kind not in ("image", "video", "voice"):
+        raise ValueError("Invalid media type.")
+    model, prompt = payload["model"], payload["prompt"].strip()
+    if not prompt:
+        raise ValueError("Prompt is empty.")
+    voice = kind == "voice"
+    folder = OUTPUT_DIR / "audio" if voice else OUTPUT_DIR
+    extension = {"voice": "wav", "image": "png", "video": "mp4"}[kind]
+    name = f"workflow_{job_id}.{extension}"
+    target = folder / name
+    if target.is_file():
+        return {"name": name}
+    metadata = image_context(payload)
+    if voice:
+        result = tts_generate(model, prompt)
+        original = folder / result["name"]
+        sidecar = json.loads(original.with_suffix(".json").read_text(encoding="utf-8"))
+        target.with_suffix(".json").write_text(json.dumps({**sidecar, **metadata}, ensure_ascii=False), encoding="utf-8")
+        original.replace(target)
+        original.with_suffix(".json").unlink(missing_ok=True)
+    elif kind == "video":
+        load_model(model, "video")
+        generate_video(prompt, payload.get("parent_image", ""), metadata, name)
+    else:
+        engine = payload.get("engine", "image")
+        if engine not in ("image", "checkpoint", "sdcpp"):
+            raise ValueError("Invalid image engine.")
+        load_model(model, engine)
+        run = generate_sdcpp if engine == "sdcpp" else generate
+        run(prompt, include_image=False, aspect_ratio=payload.get("aspect_ratio", "1:1"), metadata=metadata, filename=name)
+    return {"name": name}
+
+
+def test_image_runtime():
+    started = time.monotonic()
+    run = generate_sdcpp if active_kind == "sdcpp" else generate
+    result = run("An orange fox sitting in a quiet woodland clearing.", include_image=False, temporary=True)
+    (TEMP_IMAGES / result["name"]).unlink(missing_ok=True)
+    (TEMP_IMAGES / result["name"]).with_suffix(".json").unlink(missing_ok=True)
+    return {"seconds": round(time.monotonic() - started, 1), "device": selected_device, "model": active_model}
 
 
 def sdcpp_recipe(model_id, filenames):
@@ -1235,6 +1370,9 @@ def search(query, kind="image", image_only=False):
         options["pipeline_tag"] = "text-to-video" if kind == "video" else "text-to-image"
     api = HfApi()
     models = {item.id: item for item in api.list_models(**options)}
+    if kind == "video" and (not query or image_only):
+        for item in api.list_models(**{**options, "pipeline_tag": "image-to-video", "limit": 300}):
+            models.setdefault(item.id, item)
     normalized = re.sub(r"[-_\s]+", " ", query.strip().lower())
     if kind == "image" and normalized in ("flux", "flux gguf", "flux.1 gguf", "flux.2", "uncensored",
                                            "بدون سانسور", "flux uncensored"):
@@ -1256,7 +1394,7 @@ def search(query, kind="image", image_only=False):
             category = "gguf"
         elif "model_index.json" in names or "modular_model_index.json" in names:
             video_name = any(term in m.id.lower() for term in ("hunyuanvideo", "cogvideo", "text2world", "predict2.5", "ltx-2", "wan2", "mochi-1", "allegro"))
-            category = "video" if m.pipeline_tag == "text-to-video" or video_name else "image"
+            category = "video" if m.pipeline_tag in ("text-to-video", "image-to-video") or video_name else "image"
         elif "merged-model/model_index.json" in names:
             category = "other"
         elif checkpoint_candidate(m):
@@ -2530,7 +2668,7 @@ def tts_gallery():
             with wave.open(str(path), "rb") as file:
                 duration = round(file.getnframes() / file.getframerate(), 1)
             result.append({"name": path.name, "text": metadata.get("text", ""),
-                           "model": metadata.get("model", ""), "duration": duration})
+                           "model": metadata.get("model", ""), "duration": duration, **output_metadata(path)})
         except (OSError, ValueError, wave.Error):
             pass
     return result
@@ -2697,6 +2835,9 @@ class WebHandler(BaseHTTPRequestHandler):
             name = self.authenticated_user()
             if not name:
                 return self.send_json(401, {"error": "ابتدا وارد شوید"})
+            if self.path == "/api/progress":
+                progress = WEB_PROGRESS.get(name)
+                return self.send_json(200, {"active": bool(progress), "seconds": int(time.monotonic() - progress) if progress else 0})
             if self.path == "/api/models":
                 return self.send_json(200, {"models": web_loaded_models()})
             if self.path == "/api/gallery":
@@ -2771,6 +2912,7 @@ class WebHandler(BaseHTTPRequestHandler):
             return self.send_json(401, {"error": "ابتدا وارد شوید"})
         if not WEB_LOCK.acquire(blocking=False):
             return self.send_json(429, {"error": "سرور مشغول ساخت تصویر دیگری است"})
+        WEB_PROGRESS[username] = time.monotonic()
         try:
             data = web_config()
             user = data["users"].get(username)
@@ -2821,6 +2963,7 @@ class WebHandler(BaseHTTPRequestHandler):
             except Exception as error:
                 return self.send_json(500, {"error": str(error)[:300]})
         finally:
+            WEB_PROGRESS.pop(username, None)
             WEB_LOCK.release()
 
 
@@ -3141,13 +3284,21 @@ def dispatch(action, payload):
     if action == "tts_installed":
         return tts_installed()
     if action == "tts_generate":
-        return tts_generate(payload["model_id"], payload["text"])
+        result = tts_generate(payload["model_id"], payload["text"])
+        path = (OUTPUT_DIR / "audio" / result["name"]).with_suffix(".json")
+        metadata = json.loads(path.read_text(encoding="utf-8"))
+        path.write_text(json.dumps({**metadata, **image_context(payload)}, ensure_ascii=False), encoding="utf-8")
+        return result
     if action == "tts_gallery":
         return tts_gallery()
     if action == "tts_audio":
         return {"audio": tts_audio(payload["name"])}
     if action == "generate_video":
-        return generate_video(payload["prompt"])
+        return generate_video(payload["prompt"], payload.get("parent_image", ""), image_context(payload))
+    if action == "media_workflow_job":
+        return media_workflow_job(payload)
+    if action == "test_image_runtime":
+        return test_image_runtime()
     if action == "image":
         return {"image": image_data(payload["name"])}
     if action == "search":

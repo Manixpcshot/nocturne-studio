@@ -479,7 +479,7 @@ async fn backend_command(
         *guard = Some(start_backend(&app)?);
     }
     let backend = guard.as_mut().ok_or("موتور برنامه در دسترس نیست")?;
-    let is_download = matches!(action.as_str(), "download" | "batch_generate" | "batch_queue" | "tts_download" | "tts_generate" | "chat_pull" | "chat_generate");
+    let is_download = matches!(action.as_str(), "download" | "batch_generate" | "batch_queue" | "media_workflow_job" | "test_image_runtime" | "tts_download" | "tts_generate" | "chat_pull" | "chat_generate");
     if is_download {
         download.cancelled.store(false, Ordering::SeqCst);
         download.pid.store(backend.child.id(), Ordering::SeqCst);

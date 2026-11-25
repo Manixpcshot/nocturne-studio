@@ -40,11 +40,31 @@
     async function api(path,options={}){const response=await fetch(path,{...options,headers:{'Authorization':'Bearer '+session,...(options.headers||{})}});const data=await response.json();if(!response.ok)throw Error(data.error||'خطا');return data}
     function showApp(){ $('login').classList.toggle('hidden',!!session);$('workspace').classList.toggle('hidden',!session);$('nav').classList.toggle('hidden',!session);if(session)loadModels() }
     $('login-button').onclick=async()=>{const button=$('login-button');button.disabled=true;$('login-status').textContent='در حال ورود...';try{const data=await api('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:$('username').value,password:$('password').value})});session=data.session;sessionStorage.setItem('nocturne-session',session);$('password').value='';$('login-status').textContent='';showApp()}catch(error){$('login-status').textContent=String(error)}finally{button.disabled=false}};
-    $('logout').onclick=()=>{sessionStorage.removeItem('nocturne-session');session='';$('library').classList.add('hidden');showApp()};
+    $('logout').onclick=()=>{sessionStorage.removeItem('nocturne-session');session='';$('preview').removeAttribute('src');$('viewer-image').removeAttribute('src');$('viewer').classList.add('hidden');$('library').classList.add('hidden');showApp()};
     $('tab-create').onclick=()=>{$('workspace').classList.remove('hidden');$('library').classList.add('hidden');$('tab-create').classList.add('active');$('tab-gallery').classList.remove('active');loadModels()};
     $('tab-gallery').onclick=()=>{$('workspace').classList.add('hidden');$('library').classList.remove('hidden');$('tab-create').classList.remove('active');$('tab-gallery').classList.add('active');loadGallery()};
     async function loadModels(){try{const data=await api('/api/models');const select=$('model'),old=select.value;select.replaceChildren();for(const model of data.models){const option=document.createElement('option');option.value=model.kind+':'+model.id;option.textContent=model.id+(model.active?' · فعال':'');select.append(option)}if([...select.options].some(x=>x.value===old))select.value=old;$('generate-status').textContent=data.models.length?'':'مدلی در حافظهٔ سرور آماده نیست. مدیر باید مدل را در برنامه بارگذاری کند.'}catch(error){$('generate-status').textContent=String(error)}}
-    $('generate').onclick=async()=>{const button=$('generate');button.disabled=true;$('generate-status').textContent='در حال ساخت تصویر...';try{const data=await api('/api/generate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({prompt:$('prompt').value,aspect_ratio:$('aspect').value,model:$('model').value})});$('preview').src=data.image;$('generate-status').textContent='تصویر ساخته و در پوشهٔ تو ذخیره شد.'}catch(error){$('generate-status').textContent=String(error)}finally{button.disabled=false}};
+    $('generate').onclick=async()=>{
+      const button=$('generate'), owner=session;
+      button.disabled=true;
+      $('generate-status').textContent='در حال ارسال درخواست...';
+      const poll=setInterval(async()=>{
+        if(!owner||session!==owner||!button.disabled)return;
+        try {
+          const state=await api('/api/progress');
+          if(state.active&&button.disabled&&session===owner)$('generate-status').textContent='کامپیوتر در حال ساخت تصویر است · '+state.seconds+' ثانیه';
+        } catch {}
+      },1200);
+      try {
+        const data=await api('/api/generate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({prompt:$('prompt').value,aspect_ratio:$('aspect').value,model:$('model').value})});
+        if(session===owner){$('preview').src=data.image;$('generate-status').textContent='تصویر ساخته و در پوشهٔ تو ذخیره شد.';}
+      } catch(error) {
+        if(session===owner)$('generate-status').textContent=String(error);
+      } finally {
+        clearInterval(poll);
+        button.disabled=false;
+      }
+    };
     async function loadGallery(){const target=$('gallery');target.replaceChildren();$('gallery-status').textContent='در حال خواندن گالری...';try{const data=await api('/api/gallery');const folders=$('folders');folders.replaceChildren();for(const name of ['all',...data.folders]){const button=document.createElement('button');button.textContent=name==='all'?'همهٔ کاربران':name;button.classList.toggle('active',folder===name);button.onclick=()=>{folder=name;loadGallery()};folders.append(button)}for(const item of data.images.filter(x=>folder==='all'||x.user===folder)){const tile=document.createElement('div');tile.className='tile';const img=document.createElement('img');img.alt=item.prompt||item.name;img.loading='lazy';const response=await fetch('/api/image?user='+encodeURIComponent(item.user)+'&name='+encodeURIComponent(item.name),{headers:{Authorization:'Bearer '+session}});if(!response.ok)continue;const blob=await response.blob();const url=URL.createObjectURL(blob);img.src=url;img.onclick=()=>{$('viewer-image').src=url;$('viewer').classList.remove('hidden')};const detail=document.createElement('div'),title=document.createElement('b'),meta=document.createElement('small');title.textContent=item.prompt||item.name;meta.textContent=item.user+' · '+item.model;detail.append(title,meta);tile.append(img,detail);target.append(tile)}$('gallery-status').textContent=data.images.length?'':'هنوز عکسی در گالری وب‌سایت نیست.'}catch(error){$('gallery-status').textContent=String(error)}}
     $('viewer-close').onclick=()=>$('viewer').classList.add('hidden');$('viewer').onclick=e=>{if(e.target===$('viewer'))$('viewer').classList.add('hidden')};showApp();
   </script>
