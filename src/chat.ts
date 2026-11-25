@@ -5,7 +5,7 @@ import 'highlight.js/styles/github-dark.css';
 import './chat.css';
 
 type Message = { role: 'user' | 'assistant'; content: string; steps?: string[]; agent?: boolean; attached?: boolean; fileNames?: string[] };
-type Thread = { id: string; title: string; messages: Message[] };
+type Thread = { id: string; title: string; messages: Message[]; pinned?: boolean };
 type Attachment = { name: string; text: string };
 type Draft = { input: string; code: string; attachments: Attachment[]; agent: boolean; codeOpen: boolean; language: string };
 const titleFor = (content: string) => content.trim().replace(/\s+/g, ' ').slice(0, 65);
@@ -28,15 +28,15 @@ function formatProse(text: string) {
   const blocks = text.trim().split(/\n\s*\n/).filter(Boolean).map(block => {
     const lines = block.split('\n');
     if (lines.every(line => /^\s*[-*]\s+/.test(line))) {
-      return '<ul>' + lines.map(line => '<li>' + inline(line.replace(/^\s*[-*]\s+/, '')) + '</li>').join('') + '</ul>';
+      return '<ul dir="auto">' + lines.map(line => '<li dir="auto">' + inline(line.replace(/^\s*[-*]\s+/, '')) + '</li>').join('') + '</ul>';
     }
     if (lines.length === 1 && /^#{1,6}\s/.test(block)) {
-      return '<h3>' + inline(block.replace(/^#{1,6}\s+/, '')) + '</h3>';
+      return '<h3 dir="auto">' + inline(block.replace(/^#{1,6}\s+/, '')) + '</h3>';
     }
     if (lines.every(line => /^>\s?/.test(line))) {
-      return '<blockquote>' + lines.map(line => inline(line.replace(/^>\s?/, ''))).join('<br>') + '</blockquote>';
+      return '<blockquote dir="auto">' + lines.map(line => inline(line.replace(/^>\s?/, ''))).join('<br>') + '</blockquote>';
     }
-    return '<p>' + lines.map(inline).join('<br>') + '</p>';
+    return '<p dir="auto">' + lines.map(inline).join('<br>') + '</p>';
   });
   return '<div class="chat-prose" dir="auto">' + blocks.join('') + '</div>';
 }
@@ -57,23 +57,31 @@ export function mountChat(api: { queueDownload: (id: string, payload: Record<str
   nav.className = 'nav-item'; nav.dataset.view = 'chat';
   nav.innerHTML = `${api.symbol}<span>چت و کدنویسی</span>`;
   document.querySelector('#nav-create')!.append(nav);
-  const section = document.createElement('section'); section.id = 'chat-view'; section.className = 'view';
+  const section = document.createElement('section'); section.id = 'chat-view'; section.className = 'view chat-studio';
   section.innerHTML = `<div class="chat-layout">
     <aside class="chat-library model-card"><div class="chat-catalog"><div class="chat-presets"></div><progress id="chat-progress" max="100" hidden></progress><p id="chat-status" role="status"></p></div></aside>
     <aside class="chat-history">
-      <button id="chat-new" class="small-button">＋ گفت‌وگوی جدید</button>
+      <div class="chat-history-head"><strong>گفتگوها</strong><button id="chat-new" class="small-button">＋ گفت‌وگوی جدید</button></div>
       <input id="chat-history-search" type="search" placeholder="جست‌وجوی گفتگوها" aria-label="جست‌وجوی گفتگوها"/>
       <div id="chat-threads"></div>
-      <button id="chat-delete" class="small-button" hidden>حذف گفتگوی فعلی</button>
+      <div class="chat-thread-tools">
+        <button id="chat-pin" class="small-button" aria-pressed="false">سنجاق گفتگو</button>
+        <button id="chat-rename" class="small-button">تغییر نام گفتگو</button>
+        <button id="chat-export" class="small-button">خروجی گفتگو</button>
+        <button id="chat-delete" class="small-button" hidden>حذف گفتگوی فعلی</button>
+      </div>
     </aside>
     <div class="chat-workspace">
       <header class="chat-toolbar">
-        <button id="chat-history-toggle" class="small-button" aria-expanded="true">گفتگوها</button>
+        <div class="chat-toolbar-title"><button id="chat-history-toggle" class="small-button" aria-expanded="true">گفتگوها</button><strong id="chat-current-title" dir="auto">گفت‌وگوی جدید</strong></div>
+        <div class="chat-runtime-controls">
         <div class="chat-model-control"><select id="chat-model" aria-label="مدل چت"><option value="">مدل چت</option></select></div>
         <button id="chat-manage" class="small-button">مدل‌ها</button>
         <label class="chat-cpu"><input id="chat-cpu" type="checkbox"/> CPU</label>
+        </div>
       </header>
-      <div id="chat-messages"></div>
+      <div id="chat-messages" tabindex="0" aria-label="پیام‌های گفتگو"></div>
+      <button id="chat-latest" class="small-button" hidden>آخرین پیام ↓</button>
       <div class="chat-composer">
         <div id="chat-code-editor" class="chat-code-editor" hidden>
           <header><b>کد ورودی</b><select id="chat-code-language" aria-label="زبان کد"><option>python</option><option>javascript</option><option>typescript</option><option>html</option><option>css</option><option>rust</option><option>json</option><option>bash</option><option>text</option></select></header>
@@ -134,6 +142,16 @@ export function mountChat(api: { queueDownload: (id: string, payload: Record<str
   let agent = false;
   let readingFiles = false;
   let attachments: Attachment[] = [];
+  const latest = q<HTMLButtonElement>('chat-latest');
+  const nearEnd = () => messageBox.scrollHeight - messageBox.scrollTop - messageBox.clientHeight < 90;
+  const scrollLatest = () => { messageBox.scrollTop = messageBox.scrollHeight; latest.hidden = true; };
+  messageBox.addEventListener('scroll', () => { latest.hidden = nearEnd(); }, {passive: true});
+  latest.onclick = scrollLatest;
+  const fitComposer = () => {
+    input.style.height = 'auto';
+    input.style.height = Math.min(150, input.scrollHeight) + 'px';
+  };
+  input.addEventListener('input', fitComposer);
   let artifact = { language: '', code: '' };
   let run: { id: string; inFlight: boolean; stopped: boolean; stopping?: Promise<void> } | undefined;
 
@@ -147,6 +165,8 @@ export function mountChat(api: { queueDownload: (id: string, payload: Record<str
     if (saved && Array.isArray(saved.threads)) {
       threads = saved.threads.filter((thread: Thread) => thread && typeof thread.id === 'string' &&
         typeof thread.title === 'string' && Array.isArray(thread.messages));
+      for (const thread of threads) thread.messages = thread.messages.filter(message =>
+        message && ['user', 'assistant'].includes(message.role) && typeof message.content === 'string');
       activeId = saved.activeId;
     } else {
       const legacy = JSON.parse(localStorage.getItem('nocturne-chat-history') || '[]');
@@ -169,12 +189,35 @@ export function mountChat(api: { queueDownload: (id: string, payload: Record<str
   };
 
   const renderThreads = () => {
-    q<HTMLButtonElement>('chat-delete').hidden = generating || !activeThread();
+    const current = activeThread();
+    q('chat-current-title').textContent = current?.title || 'گفت‌وگوی جدید';
+    q<HTMLButtonElement>('chat-delete').hidden = !current;
+    q<HTMLButtonElement>('chat-pin').setAttribute('aria-pressed', String(Boolean(current?.pinned)));
+    for (const id of ['chat-delete', 'chat-pin', 'chat-rename', 'chat-export']) {
+      q<HTMLButtonElement>(id).disabled = generating || !current;
+    }
     const query = historySearch.value.trim().toLowerCase();
-    q('chat-threads').innerHTML = threads
-      .filter(thread => thread.title.toLowerCase().includes(query))
-      .map(thread => `<button class="chat-thread" data-thread="${escape(thread.id)}" aria-pressed="${thread.id === activeId}" ${generating ? 'disabled' : ''}>${escape(thread.title)}</button>`)
-      .join('') || '<p class="chat-history-empty">گفتگویی پیدا نشد.</p>';
+    const found = threads.filter(thread => !query || thread.title.toLowerCase().includes(query) ||
+      thread.messages.some(message => message.content.toLowerCase().includes(query)));
+    found.sort((a, b) => Number(Boolean(b.pinned)) - Number(Boolean(a.pinned)));
+    const buttons = found.map(thread => {
+      const button = document.createElement('button');
+      button.className = 'chat-thread';
+      button.dataset.thread = thread.id;
+      button.setAttribute('aria-pressed', String(thread.id === activeId));
+      button.disabled = generating;
+      button.dir = 'auto';
+      button.textContent = (thread.pinned ? '★ ' : '') + thread.title;
+      button.title = thread.title;
+      return button;
+    });
+    const history = q('chat-threads');
+    history.replaceChildren(...buttons);
+    if (!buttons.length) {
+      const empty = document.createElement('p');
+      empty.textContent = 'گفتگویی پیدا نشد.';
+      history.append(empty);
+    }
   };
 
   const render = (forceScroll = false) => {
@@ -196,7 +239,8 @@ export function mountChat(api: { queueDownload: (id: string, payload: Record<str
     } else if (!generating && messages.length) {
       messageBox.insertAdjacentHTML('beforeend', '<button class="small-button chat-retry" data-retry>تلاش دوباره</button>');
     }
-    if (forceScroll || atBottom) messageBox.scrollTop = messageBox.scrollHeight;
+    if (forceScroll || atBottom) scrollLatest();
+    else latest.hidden = false;
   };
 
   const renderAttachments = () => {
@@ -217,6 +261,7 @@ export function mountChat(api: { queueDownload: (id: string, payload: Record<str
     activeId = id;
     const draft = drafts.get(id);
     input.value = draft?.input || '';
+    fitComposer();
     codeInput.value = draft?.code || '';
     codeLanguage.value = draft?.language || 'python';
     attachments = draft?.attachments || [];
@@ -469,6 +514,7 @@ export function mountChat(api: { queueDownload: (id: string, payload: Record<str
     const files = attachments;
     attachments = [];
     input.value = '';
+    fitComposer();
     codeInput.value = '';
     codeEditor.hidden = true;
     q('chat-code-toggle').setAttribute('aria-expanded', 'false');
@@ -490,6 +536,39 @@ export function mountChat(api: { queueDownload: (id: string, payload: Record<str
     void runReply(thread, user, user.agent ? files : [], last?.role === 'assistant' ? last : undefined);
   };
 
+  q('chat-pin').onclick = () => {
+    const thread = activeThread();
+    if (!thread || generating) return;
+    thread.pinned = !thread.pinned;
+    save();
+    renderThreads();
+  };
+  q('chat-rename').onclick = () => {
+    const thread = activeThread();
+    if (!thread || generating) return;
+    const title = window.prompt(document.documentElement.lang === 'en' ? 'Conversation name' : 'نام گفتگو', thread.title)?.trim();
+    if (!title) return;
+    thread.title = title.slice(0, 80);
+    save();
+    renderThreads();
+  };
+  q('chat-export').onclick = () => {
+    const thread = activeThread();
+    if (!thread) return;
+    const en = document.documentElement.lang === 'en';
+    const newline = String.fromCharCode(10).repeat(2);
+    const markdown = ['# ' + thread.title, ...thread.messages.map(message => {
+      const author = message.role === 'user' ? (en ? 'You' : 'شما') : (en ? 'Assistant' : 'دستیار');
+      return '## ' + author + newline + message.content;
+    })].join(newline);
+    const url = URL.createObjectURL(new Blob([markdown], {type: 'text/markdown;charset=utf-8'}));
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = 'nocturne-conversation.md';
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(url), 3000);
+  };
+
   q('chat-new').onclick = () => selectThread(crypto.randomUUID());
   q('chat-delete').onclick = () => {
     if (generating || readingFiles || !activeThread() || !window.confirm('این گفتگو حذف شود؟')) return;
@@ -506,7 +585,12 @@ export function mountChat(api: { queueDownload: (id: string, payload: Record<str
   q('chat-history-toggle').onclick = () => {
     const hidden = layout.classList.toggle('history-collapsed');
     q('chat-history-toggle').setAttribute('aria-expanded', String(!hidden));
+    localStorage.setItem('nocturne-chat-sidebar-hidden', hidden ? '1' : '0');
   };
+  if (localStorage.getItem('nocturne-chat-sidebar-hidden') === '1') {
+    layout.classList.add('history-collapsed');
+    q('chat-history-toggle').setAttribute('aria-expanded', 'false');
+  }
   modelSelect.onchange = () => localStorage.setItem('nocturne-chat-model', modelSelect.value);
   agentButton.onclick = () => {
     if (generating || readingFiles) return;

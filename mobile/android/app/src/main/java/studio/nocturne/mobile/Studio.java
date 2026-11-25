@@ -68,9 +68,32 @@ final class Studio {
     private JSONArray photos = new JSONArray();
     private boolean galleryReady;
     private String initError = "";
+    private JSONArray activity;
+    private String updatePhase = "";
+
+    private void record(String section, String phase, String detail) {
+        JSONArray updated = new JSONArray().put(json("time", System.currentTimeMillis(),
+                "section", section, "phase", phase, "detail", detail));
+        for (int i = 0; i < Math.min(activity.length(), 59); i++) updated.put(activity.optJSONObject(i));
+        activity = updated;
+        context.getSharedPreferences("activity", 0).edit().putString("events", activity.toString()).apply();
+    }
+
+    void clearActivity() {
+        activity = new JSONArray();
+        context.getSharedPreferences("activity", 0).edit().remove("events").apply();
+        changed();
+    }
+
+    void exportActivity(boolean success) {
+        record("gallery", success ? "completed" : "error", "");
+        changed();
+    }
 
     private Studio(Context context) {
         this.context = context;
+        try { activity = new JSONArray(context.getSharedPreferences("activity", 0).getString("events", "[]")); }
+        catch (org.json.JSONException error) { activity = new JSONArray(); }
         gpuAvailable = Hardware.gpuEngine(context);
         models = new File(context.getNoBackupFilesDir(), "models");
         gallery = new File(context.getNoBackupFilesDir(), "gallery");
@@ -90,6 +113,7 @@ final class Studio {
             Log.e("Nocturne", "Could not load the model catalog", error);
             initError = "catalog";
         }
+        record("device", initError.isEmpty() ? "completed" : "error", initError);
         selected = context.getSharedPreferences("studio", 0).getString("selected", "");
         selectedText = context.getSharedPreferences("studio", 0).getString("selectedText", "");
         preferred = context.getSharedPreferences("studio", 0).getString("engine", "auto");
@@ -118,7 +142,18 @@ final class Studio {
     }
 
     void listen(Runnable callback) { listener = callback; }
-    void updateChanged() { main.post(this::changed); }
+    void updateChanged() {
+        main.post(() -> {
+            String phase = AppUpdates.get(context).state().optString("phase");
+            if (!phase.equals(updatePhase)) {
+                updatePhase = phase;
+                if ("checking".equals(phase)) record("appUpdates", "started", "");
+                else if ("current".equals(phase) || "ready".equals(phase)) record("appUpdates", "completed", "");
+                else if ("error".equals(phase)) record("appUpdates", "error", "");
+            }
+            changed();
+        });
+    }
     boolean generating() { return generating; }
     private void changed() { if (listener != null) listener.run(); }
 
@@ -146,7 +181,7 @@ final class Studio {
             } catch (Exception error) { Log.e("Nocturne", "Catalog entry unavailable", error); }
         }
         JSONObject state = json("models", entries, "selected", selected, "photos", photos, "selectedText", selectedText, "chat", chat,
-                "appUpdate", AppUpdates.get(context).state(),
+                "appUpdate", AppUpdates.get(context).state(), "activity", activity,
                 "download", download, "generation", generation, "generating", generating,
                 "downloading", downloading, "initError", initError, "preferred", preferred,
                 "gpuAvailable", gpuAvailable, "galleryReady", galleryReady, "generationStarted", generationStarted);
@@ -177,6 +212,7 @@ final class Studio {
         var model = catalog.get(id);
         if (model == null || model.installed(models) || downloading) return;
         if (!Hardware.fits(Hardware.memory(context).totalMem, model.ram())) {
+            record("downloads", "error", "ramShort");
             download = json("id", id, "phase", "error", "error", "ram");
             changed();
             return;
@@ -185,6 +221,7 @@ final class Studio {
         transfer = control;
         downloading = true;
         activeDownload = id;
+        record("downloads", "started", "");
         download = json("id", id, "phase", "connecting", "received", model.received(models));
         changed();
         work.execute(() -> {
@@ -208,6 +245,8 @@ final class Studio {
                 activeDownload = "";
                 download = json("id", id, "phase", installed ? "ready" : control.paused() ? "paused" : "error",
                         "received", model.received(models), "error", error);
+                record("downloads", installed ? "completed" : control.paused() ? "stopped" : "error",
+                        !installed && !control.paused() && error.matches("disk|checksum|range|network") ? error : "");
                 if (installed && (model.text() ? selectedText : selected).isEmpty()) select(id);
                 changed();
             });
@@ -279,6 +318,7 @@ final class Studio {
             mode = tryGpu ? (model.ram() >= 8 ? "hybrid" : "vulkan") : "cpu";
         }
         if (("fast".equals(mode) && !model.fast()) || (usesGpu(mode) && !gpuAvailable)) mode = "cpu";
+        record("image", "started", mode);
         startEngine(mode);
     }
 
@@ -286,12 +326,14 @@ final class Studio {
         if (generating || prompt == null || prompt.trim().isEmpty() || prompt.length() > 1500) return;
         Model model = catalog.get(selectedText);
         if (model == null || !model.installed(models)) {
+            record("chat", "error", "noModels");
             chat = json("error", "model", "prompt", prompt);
             changed();
             return;
         }
         var memory = Hardware.memory(context);
         if (memory.lowMemory || !Hardware.fits(memory.totalMem, model.ram()) || memory.availMem < 768L * 1024 * 1024) {
+            record("chat", "error", "memory");
             chat = json("error", "memory", "prompt", prompt);
             changed();
             return;
@@ -308,6 +350,7 @@ final class Studio {
         pending.putBundle("components", model.paths(models));
         pending.putString("prompt", prompt.trim());
         pending.putInt("threads", Math.max(1, Math.min(6, Runtime.getRuntime().availableProcessors() - 1)));
+        record("chat", "started", "cpu");
         startEngine("text");
     }
 
@@ -365,6 +408,7 @@ final class Studio {
         if (!success && !cancelled && !cancelling && !usingFallback && !"text".equals(runningMode) && !"cpu".equals(runningMode)) {
             Log.w("Nocturne", runningMode + " failed. Retrying on CPU: " + error);
             if (usesGpu(runningMode)) gpuFailures.add(metadata.optString("modelId"));
+            record("image", "retry", "cpu");
             usingFallback = true;
             disconnect();
             if (output != null) new File(output.getPath() + ".tmp").delete();
@@ -404,7 +448,10 @@ final class Studio {
         generating = false;
         disconnect();
         pending = null;
-        if ("text".equals(runningMode)) {
+        boolean text = "text".equals(runningMode);
+        record(text ? "chat" : "image", success ? "completed" : cancelled ? "stopped" : "error",
+                !success && !cancelled && "memory".equals(error) ? "memory" : text ? "cpu" : runningMode);
+        if (text) {
             String prompt = chat.optString("prompt");
             chat = success ? json("prompt", prompt, "answer", chatAnswer)
                     : json("prompt", prompt, "error", cancelled ? "cancelled" : "engine");
@@ -436,6 +483,7 @@ final class Studio {
     }
 
     private void generationError(String error) {
+        record("image", "error", "model".equals(error) ? "noModels" : error);
         generation = json("phase", "error", "error", error);
         changed();
     }

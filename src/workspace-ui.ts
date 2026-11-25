@@ -11,6 +11,7 @@ export const pages = {
   models: { label: 'کتابخانهٔ مدل‌ها', group: 'کتابخانه' },
   gallery: { label: 'گالری من', group: 'کتابخانه' },
   'audio-gallery': { label: 'گالری صدا', group: 'کتابخانه' },
+  activity: { label: 'گزارش فعالیت', group: 'مدیریت' },
   website: { label: 'وب‌سایت', group: 'مدیریت' },
   settings: { label: 'تنظیمات', group: '' },
 } as const;
@@ -54,17 +55,28 @@ const privacyControls = [
 
 export function workspacePages(themeOptions: string, aspectOptions: string, icon: (name: 'WandSparkles' | 'Film' | 'Mic2' | 'Layers' | 'Blocks' | 'Images' | 'ArrowUpLeft' | 'Sparkles' | 'Globe2') => string) {
   const cards = [
+    ['studio', 'WandSparkles', 'ساخت، ویرایش و مقایسهٔ تصویر'],
     ['video', 'Film', 'ساخت ویدیو از پرامپت'],
     ['voice', 'Mic2', 'تبدیل متن به گفتار'],
     ['chat', 'Sparkles', 'گفتگو با مدل محلی'],
     ['batch', 'Layers', 'ساخت چند تصویر و مدیریت صف'],
+  ] as const;
+  const management = [
+    ['models', 'Blocks', 'جست‌وجو و مدیریت مدل‌ها'],
     ['gallery', 'Images', 'تصاویر ذخیره‌شده و پرامپت‌های قبلی'],
+    ['activity', 'Layers', 'کارها و خطاهای ثبت‌شده'],
     ['website', 'Globe2', 'مدیریت سایت، کاربران و سهمیه‌ها'],
   ] as const;
   const startOptions = (Object.keys(pages) as Page[]).filter(page => page !== 'settings');
   const savedStart = localStorage.getItem(startKey) || 'home';
   const validStart = savedStart === 'last' || startOptions.some(page => page === savedStart) ? savedStart : 'home';
   const option = (value: string, label: string) => `<option value="${value}" ${validStart === value ? 'selected' : ''}>${label}</option>`;
+  const launchers = (items: typeof cards | typeof management) => `<div class="workspace-launchers">${items.map(([page, symbol, description]) => `
+          <button type="button" class="workspace-launcher" data-open-workspace="${page}">
+            <span class="launcher-symbol" aria-hidden="true">${icon(symbol)}</span>
+            <span><b>${pages[page].label}</b><small>${description}</small></span>
+            <span class="launcher-arrow" aria-hidden="true">${icon('ArrowUpLeft')}</span>
+          </button>`).join('')}</div>`;
   return `
     <section class="view" id="home-view">
       <header class="home-hero">
@@ -80,13 +92,10 @@ export function workspacePages(themeOptions: string, aspectOptions: string, icon
         <img class="hero-cover" src="${cover}" alt="" fetchpriority="high"/>
       </header>
       <section class="home-tools" aria-labelledby="home-tools-title">
-        <h2 id="home-tools-title">ابزارهای استودیو</h2>
-        <div class="workspace-launchers">${cards.map(([page, symbol, description]) => `
-          <button type="button" class="workspace-launcher" data-open-workspace="${page}">
-            <span class="launcher-symbol" aria-hidden="true">${icon(symbol)}</span>
-            <span><b>${pages[page].label}</b><small>${description}</small></span>
-            <span class="launcher-arrow" aria-hidden="true">${icon('ArrowUpLeft')}</span>
-          </button>`).join('')}</div>
+        <h2 id="home-tools-title" class="workspace-home-title">استودیوی ساخت</h2>
+        ${launchers(cards)}
+        <h2 class="workspace-home-title">ادامه و مدیریت</h2>
+        ${launchers(management)}
       </section>
     </section>
     <section class="view" id="settings-view">

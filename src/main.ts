@@ -18,6 +18,7 @@ import { hideStartup, showStartup, startupFailed } from './startup';
 import './projects.css';
 import { styleLibrary, stylePrompt } from './styles-library';
 import { mountMixedQueue } from './mixed-queue';
+import { activityPage, mountActivity } from './activity';
 import { activateProject, addProject, buildCombinations, newId, pendingQueue, persistQueue, projectId, projects, relatedImages, scopedKey, stored, type QueueJob } from './projects';
 import { matrixDialog, projectBar, projectDialog, queueTools } from './project-ui';
 
@@ -207,6 +208,13 @@ const english: Record<string, string> = {
   'استودیوی تصویر':'Image studio','محیط کار':'Workspace','ساخت تصویر':'Create image','ساخت دسته‌ای':'Batch studio','ساخت ویدیو':'Create video','ساخت صدا':'Create audio','گالری صدا':'Audio gallery','مدل‌ها و جست‌وجو':'Models and search','گالری من':'My gallery','دستگاه پردازش':'Processing device','دستگاه انتخابی':'Selected device','رم سیستم':'System RAM','کارت گرافیک':'Graphics card','استودیو':'Studio','در حال آماده‌سازی...':'Getting ready...','تخیّل کن، تصویرش کن':'Imagine it. Create it','ایده‌ات را بنویس؛ Nocturne آن را با مدل انتخابی تو به تصویر تبدیل می‌کند.':'Describe your idea and Nocturne will create it with your selected model.','بوم تصویر':'Image canvas','هنوز تصویری ساخته نشده':'No image yet','ایدهٔ بعدی‌ات اینجا جان می‌گیرد':'Your next idea starts here','پرامپت را بنویس و روی «ساخت تصویر» بزن.':'Write a prompt and select Create image.','کتابخانهٔ تو':'Your library','عکس‌های اخیر':'Recent images','نمایش همه':'View all','پرامپت تصویر':'Image prompt','فارسی یا انگلیسی بنویس':'Write in Persian or English','انتخاب مدل':'Select model','عکس موقت؛ تا زمان ذخیره وارد گالری نشود':'Temporary image; save it to add it to the gallery','پنهان‌کردن تصویر روی بوم':'Hide image preview','پیش‌نمایش پنهان است':'Preview hidden','نمایش این عکس':'Reveal image','هنوز عکسی ذخیره نشده است.':'No saved images yet.','عکس موقت ساخته شد. برای نگه‌داشتن آن «ذخیره» را بزن.':'Temporary image created. Select Save to keep it.','عکس در پوشهٔ خروجی ذخیره شد.':'Image saved to the output folder.','همهٔ مدل‌ها':'All models','عکسی در این دسته پیدا نشد.':'No images in this category.','گالری تصاویر':'Image gallery','تمام تصویرهایی که با برنامه ساخته‌ای، همین‌جا نگهداری می‌شوند.':'Your saved images appear here.','نمایش پرامپت و مدل زیر عکس‌ها':'Show prompt and model under images','آماده‌سازی اولیه':'First run setup','برنامه پیش‌نیازها را بررسی می‌کند و فقط مواردِ نصب‌نشده را دریافت می‌کند. نصب مدل‌های هوش مصنوعی جداگانه و به انتخاب شماست.':'The app checks prerequisites and downloads only missing components. AI models are installed separately when you choose.','تلاش دوباره':'Retry','در حال جست‌وجو...':'Searching...','دانلود مدل':'Download model','بررسی':'Inspect','مدل‌های فارسی':'Persian models','مدل‌های محبوب':'Popular models','ساخت گفتار':'Generate speech','متنی که خوانده شود':'Text to read','مدل نصب‌شده و زبان':'Installed model and language','صدا در پوشهٔ خروجی ذخیره می‌شود.':'Audio is saved to the output folder.','جست‌وجوی مدل صدا':'Search voice models','تغییر پوشهٔ دانلود مدل‌ها':'Change model download folder','جست‌وجو':'Search','پخش صدا':'Play audio','هنوز صدایی ساخته نشده است.':'No audio yet.','پوشهٔ دانلود مدل‌ها':'Model download folder','مدل‌های روی سیستم':'Local models','در حال بررسی...':'Checking...'
 };
 Object.assign(english, {
+  'استودیوی پروژه':'Project studio','همهٔ پروژه‌ها':'All projects','باز کردن قالب‌ها':'Browse styles',
+  'صف پروژه':'Project queue','گالری پروژه':'Project gallery','کارها و خطاهای ثبت‌شده':'Recorded jobs and errors',
+  'جست‌وجو و مدیریت مدل‌ها':'Find and manage models','ساخت، ویرایش و مقایسهٔ تصویر':'Create, edit and compare images',
+  'گزارش فعالیت':'Activity log','کاربران و سهمیه‌ها':'Users and quotas','اتصال گوشی و سرور':'Server and phone',
+  'صف چندرسانه‌ای':'Media workflow','استودیوی ساخت':'Creation studio','ادامه و مدیریت':'Review and manage',
+  'سنجاق گفتگو':'Pin conversation','تغییر نام گفتگو':'Rename conversation','خروجی گفتگو':'Export conversation',
+  'آخرین پیام ↓':'Latest message ↓','پیام‌های گفتگو':'Conversation messages','گفت‌وگوی جدید':'New conversation',
   'قالب‌های تصویر':'Image styles', 'موضوع قالب':'Style subject', 'سوژهٔ دلخواه یا روباه نمونه':'Your subject or the sample fox',
   'قالب، پرامپت قابل‌ویرایش را وارد می‌کند.':'Select a style to load an editable prompt.',
   'ارسال به ویرایش':'Send to image editor','ارسال به ویدیو':'Send to video','حذف عکس مرجع':'Clear reference',
@@ -228,6 +236,8 @@ const queueLabels = [
 ] as const;
 
 function applyLanguage() {
+  activity?.localize();
+  refreshStudioProject();
   const styleGrid = document.querySelector('#style-grid');
   if (styleGrid && styleGrid.getAttribute('data-language') !== language) {
     styleGrid.innerHTML = styleLibrary(language === 'en');
@@ -241,7 +251,7 @@ function applyLanguage() {
   const walker = document.createTreeWalker(app, NodeFilter.SHOW_TEXT);
   let node: Node | null;
   while ((node = walker.nextNode())) {
-    if (node.parentElement?.closest('#project-select option:not([value=""]), #project-reference-select option:not([value=""]), #matrix-models label, #matrix-preview label, #chat-threads, #chat-artifact-code, .cache-path, textarea, .chat-prose, .chat-file-names, .code-box pre, [data-queue-model] option[value]:not([value=""]), #preset-select option:not([value=""])')) continue;
+    if (node.parentElement?.closest('#activity-view, #chat-current-title, [data-studio-project], #project-select option:not([value=""]), #project-reference-select option:not([value=""]), #matrix-models label, #matrix-preview label, #chat-threads, #chat-artifact-code, .cache-path, textarea, .chat-prose, .chat-file-names, .code-box pre, [data-queue-model] option[value]:not([value=""]), #preset-select option:not([value=""])')) continue;
     const original = node.textContent?.trim() || '';
     if (Object.hasOwn(translations, original)) node.textContent = node.textContent!.replace(original, translations[original]);
     else if (node.parentElement?.matches('.queue-position, .queue-job-progress, #queue-jobs-count, #queue-details')) {
@@ -322,6 +332,7 @@ function bytes(value: number) {
 
 let downloadCenter: ReturnType<typeof mountDownloadCenter>;
 let downloadsReady = false;
+let activity: ReturnType<typeof mountActivity> | undefined;
 
 async function call<T>(action: string, payload: Record<string, unknown> = {}): Promise<T> {
   const response = await invoke<ApiResult<T>>('backend_command', { action, payload });
@@ -450,6 +461,23 @@ function organizeStudioView() {
     <button type="button" data-studio-mode="edit">${icon('ImagePlus', 15)}<span>ویرایش</span></button>
     <button type="button" data-studio-mode="compare">${icon('Layers', 15)}<span>مقایسه</span></button>`;
   head.after(tabs);
+  const dock = document.createElement('div');
+  dock.className = 'studio-dock';
+  dock.innerHTML = '<div><span>استودیوی پروژه</span><strong data-studio-project dir="auto"></strong></div><div class="studio-shortcuts"><button type="button" id="studio-open-styles" class="small-button">باز کردن قالب‌ها</button><button type="button" id="studio-open-queue" class="small-button">صف پروژه</button><button type="button" id="studio-open-gallery" class="small-button">گالری پروژه</button></div>';
+  tabs.after(dock);
+  dock.querySelector<HTMLButtonElement>('#studio-open-styles')!.onclick = () => {
+    setStudioMode('create');
+    const styles = document.querySelector<HTMLDetailsElement>('.style-library')!;
+    styles.open = true;
+    styles.scrollIntoView({block: 'nearest'});
+    styles.querySelector('input')?.focus({preventScroll: true});
+  };
+  dock.querySelector<HTMLButtonElement>('#studio-open-queue')!.onclick = () => {
+    openWorkspace('batch');
+    document.querySelector<HTMLButtonElement>('[data-batch-mode="mixed"]')?.click();
+  };
+  dock.querySelector<HTMLButtonElement>('#studio-open-gallery')!.onclick = () => openWorkspace('gallery');
+  refreshStudioProject();
   tabs.querySelectorAll<HTMLButtonElement>('button').forEach(button => {
     button.onclick = () => setStudioMode(button.dataset.studioMode as StudioMode);
   });
@@ -482,6 +510,12 @@ function organizeStudioView() {
   view.querySelector('.panel-top')!.insertAdjacentHTML('beforeend', '<span id="studio-preview-state" class="studio-preview-state" aria-hidden="true"></span>');
   setStudioMode('create');
   renderStudioPreview();
+}
+
+function refreshStudioProject() {
+  const context = document.querySelector('[data-studio-project]');
+  const name = projects.find(item => item.id === projectId)?.name || (language === 'en' ? 'All projects' : 'همهٔ پروژه‌ها');
+  if (context && context.textContent !== name) context.textContent = name;
 }
 
 function setStudioMode(mode: StudioMode) {
@@ -527,6 +561,27 @@ function setCompactNavigation(compact: boolean) {
 }
 
 function organizeWorkspace() {
+  const website = document.querySelector('.website-grid')!;
+  const sections = Array.from(website.querySelectorAll<HTMLElement>(':scope > .model-card'));
+  const websiteTabs = document.createElement('div');
+  websiteTabs.className = 'workspace-sections';
+  websiteTabs.setAttribute('role', 'group');
+  websiteTabs.setAttribute('aria-label', 'وب‌سایت');
+  const labels = ['اتصال گوشی و سرور', 'کاربران و سهمیه‌ها'];
+  const controls = labels.map((label, index) => {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'small-button';
+    button.textContent = label;
+    button.onclick = () => {
+      controls.forEach((tab, position) => tab.setAttribute('aria-pressed', String(index === position)));
+      sections.forEach((section, position) => section.hidden = index !== position);
+    };
+    return button;
+  });
+  websiteTabs.append(...controls);
+  website.before(websiteTabs);
+  controls[0].click();
   const video = document.querySelector('.video-layout')!;
   video.prepend(video.querySelector('.composer')!);
   const gallery = document.querySelector('#gallery-view .gallery-search')!;
@@ -558,7 +613,7 @@ function organizeBatchStudio() {
   modes.className = 'batch-mode-tabs';
   modes.setAttribute('role', 'group');
   modes.setAttribute('aria-label', 'Batch mode');
-  modes.innerHTML = '<button type="button" class="small-button" data-batch-mode="queue" data-work>Job queue</button><button type="button" class="small-button" data-batch-mode="quick" data-work>Quick batch</button>';
+  modes.innerHTML = '<button type="button" class="small-button" data-batch-mode="queue" data-work>Job queue</button><button type="button" class="small-button" data-batch-mode="quick" data-work>Quick batch</button><button type="button" class="small-button" data-batch-mode="mixed" data-work>صف چندرسانه‌ای</button>';
   view.querySelector('.section-head')!.after(modes);
   const choose = (mode: string) => {
     view.setAttribute('data-batch-mode', mode);
@@ -604,6 +659,7 @@ function render() {
           </div>
           <div class="nav-group">
             <div class="sidebar-label">مدیریت</div>
+            <button class="nav-item" data-view="activity">${icon("Layers")}<span>گزارش فعالیت</span></button>
             <button class="nav-item" data-view="website">${icon('Globe2')}<span>وب‌سایت</span></button>
           </div>
         </nav>
@@ -620,6 +676,7 @@ function render() {
             <span id="work-status" role="status"><span class="status-dot"></span>در حال آماده‌سازی...</span>
           </div>
         </header>
+        ${activityPage}
         ${workspacePages(
           Object.entries(themes).map(([value, label]) => `<option value="${value}">${label}</option>`).join(''),
           aspectOptions.map(([value, label]) => `<option value="${value}">${label}</option>`).join(''),
@@ -644,6 +701,7 @@ function render() {
   refreshIcons();
   attachEvents();
   mountProjectControls();
+  activity = mountActivity(() => language === 'en');
   mixedRefresh = mountMixedQueue(document.querySelector('#batch-view')!, {
     key: () => scopedKey('nocturne-mixed-queue'), en: () => language === 'en', busy: () => busy,
     folder: () => outputFolder,
@@ -734,6 +792,7 @@ function setView(view: string) {
   if (view === 'voice') { void refreshInstalledVoices(); }
   if (view === 'batch') { void refreshInstalledVoices().then(() => mixedRefresh?.()); }
   if (view === 'website') void refreshWebsite();
+  if (view === 'activity') void activity?.refresh();
   if (view === 'models') void call<{ logged_in: boolean }>('hf_auth_status').then(state => { document.querySelector('#hf-auth-status')!.textContent = state.logged_in ? 'حساب متصل است' : 'حساب متصل نیست'; }).catch(() => {});
 }
 
@@ -1831,6 +1890,7 @@ function refreshProjectPicker() {
   picker.replaceChildren(new Option(language === 'en' ? 'All projects' : 'همهٔ پروژه‌ها', ''),
     ...projects.map(project => new Option(project.name, project.id)));
   picker.value = projectId;
+  refreshStudioProject();
   document.querySelector<HTMLElement>('#project-references')!.hidden = !projectId;
 }
 
@@ -2476,8 +2536,19 @@ async function boot() {
     void refreshReferences();
   } catch (error) {
     if (rendered) setBusy(false);
+    reportInterfaceError();
     startupFailed(error, rendered);
   }
 }
+
+let lastInterfaceError = -60000;
+function reportInterfaceError() {
+  const time = performance.now();
+  if (time - lastInterfaceError < 10000) return;
+  lastInterfaceError = time;
+  void invoke('activity_interface_error').catch(() => {});
+}
+window.addEventListener('error', reportInterfaceError);
+window.addEventListener('unhandledrejection', reportInterfaceError);
 
 void boot();

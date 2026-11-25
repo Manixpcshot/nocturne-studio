@@ -205,6 +205,7 @@ public final class MainActivity extends Activity {
     }
 
     private void exportNotice(boolean success) {
+        studio.exportActivity(success);
         if (web != null) web.evaluateJavascript("window.nocturneNotice && window.nocturneNotice(" + success + ")", null);
         else if (!success) Toast.makeText(this, R.string.export_failed, Toast.LENGTH_SHORT).show();
     }
@@ -229,6 +230,7 @@ public final class MainActivity extends Activity {
     }
 
     private final class Bridge {
+        @JavascriptInterface public void clearActivity() { runOnUiThread(studio::clearActivity); }
         @JavascriptInterface public void checkUpdate() {
             AppUpdates.get(MainActivity.this).check(true, studio::updateChanged);
         }

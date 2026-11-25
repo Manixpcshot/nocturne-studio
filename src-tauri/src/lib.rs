@@ -1,7 +1,11 @@
+mod diagnostics;
+
+use diagnostics::{activity_read, activity_clear, activity_interface_error};
+use std::time::Instant;
 use std::collections::HashMap;
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Write};
-use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::path::PathBuf;
@@ -189,7 +193,11 @@ async fn update_diffusers_engine(
     minimax: Option<bool>,
 ) -> Result<Value, String> {
     let state = Arc::clone(&state);
-    tauri::async_runtime::spawn_blocking(move || {
+    let started = Instant::now();
+    diagnostics::record(&app, "update_diffusers_engine", "started", None, None);
+    let worker_app = app.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        let app = worker_app;
         {
             let mut guard = state.lock().map_err(|_| "موتور برنامه در دسترس نیست".to_string())?;
             *guard = None;
@@ -220,12 +228,18 @@ async fn update_diffusers_engine(
         let version = String::from_utf8_lossy(&version.stdout).trim().to_string();
         emit_setup(&app, "موتور Diffusers به‌روز شد.");
         Ok(json!({"version": version}))
-    }).await.map_err(|e| format!("به‌روزرسانی متوقف شد: {e}"))?
+    }).await.map_err(|e| format!("به‌روزرسانی متوقف شد: {e}"))?;
+    diagnostics::outcome(&app, "update_diffusers_engine", &result, started, false);
+    result
 }
 
 #[tauri::command]
 async fn setup_install(app: AppHandle) -> Result<Value, String> {
-    tauri::async_runtime::spawn_blocking(move || {
+    let started = Instant::now();
+    diagnostics::record(&app, "setup_install", "started", None, None);
+    let worker_app = app.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        let app = worker_app;
         #[cfg(target_os = "linux")]
         if python_executable(&app).is_none() {
             emit_setup(&app, "در حال ساخت محیط مستقل Python...");
@@ -269,13 +283,15 @@ async fn setup_install(app: AppHandle) -> Result<Value, String> {
         let result = prerequisites_status(&app)?;
         if result["ready"] != true { return Err("برخی پیش‌نیازها هنوز نصب نشده‌اند. دوباره تلاش کنید.".into()); }
         Ok(result)
-    }).await.map_err(|e| format!("راه‌اندازی متوقف شد: {e}"))?
+    }).await.map_err(|e| format!("راه‌اندازی متوقف شد: {e}"))?;
+    diagnostics::outcome(&app, "setup_install", &result, started, false);
+    result
 }
 
 struct Backend {
     child: Child,
     stdin: ChildStdin,
-    stdout: BufReader<ChildStdout>,
+    responses: std::sync::mpsc::Receiver<Result<Value, String>>,
 }
 
 struct DownloadState {
@@ -352,12 +368,58 @@ fn start_backend(app: &AppHandle) -> Result<Backend, String> {
         .env("HF_HOME", chosen_home)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| format!("اجرای Python ناموفق بود: {e}"))?;
+    if let Some(stderr) = child.stderr.take() {
+        let app = app.clone();
+        std::thread::spawn(move || {
+            use std::io::Read;
+            // Drain stderr while retaining only a bounded diagnostic tail in memory.
+            let mut reader = BufReader::new(stderr);
+            let mut chunk = [0; 8192];
+            let mut tail = Vec::new();
+            while let Ok(count) = reader.read(&mut chunk) {
+                if count == 0 { break; }
+                tail.extend_from_slice(&chunk[..count]);
+                if tail.len() > 8192 { tail.drain(..tail.len() - 8192); }
+            }
+            let trace = String::from_utf8_lossy(&tail);
+            if trace.contains("ModuleNotFoundError:") || trace.contains("ImportError:") {
+                diagnostics::record(&app, "python_runtime", "error", Some("dependency"), None);
+            }
+        });
+    }
     let stdin = child.stdin.take().ok_or("ورودی موتور پیدا نشد")?;
-    let stdout = BufReader::new(child.stdout.take().ok_or("خروجی موتور پیدا نشد")?);
-    Ok(Backend { child, stdin, stdout })
+    let stdout = child.stdout.take().ok_or("خروجی موتور پیدا نشد")?;
+    let (sender, responses) = std::sync::mpsc::channel();
+    let app = app.clone();
+    std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines() {
+            let response = line.map_err(|error| error.to_string()).and_then(|line| {
+                serde_json::from_str::<Value>(&line)
+                    .map_err(|error| format!("پاسخ نامعتبر از موتور: {error}"))
+            });
+            if let Ok(value) = &response {
+                if let Some(event) = value["event"].as_str() {
+                    if event == "diagnostic" && value["data"]["action"] == "web_generate" {
+                        let ok = value["data"]["ok"] == true;
+                        diagnostics::record(&app, "web_generate", if ok { "success" } else { "error" },
+                            if ok { None } else { Some("failed") }, None);
+                        continue;
+                    }
+                    if matches!(event, "download-progress" | "batch-progress" | "queue-progress" |
+                        "chat-progress" | "chat-token" | "chat-agent-step") {
+                        let _ = app.emit(event, &value["data"]);
+                        continue;
+                    }
+                }
+            }
+            let invalid = response.is_err();
+            if sender.send(response).is_err() || invalid { break; }
+        }
+    });
+    Ok(Backend { child, stdin, responses })
 }
 
 fn save_folder(app: &AppHandle, state: State<'_, Arc<Mutex<Option<Backend>>>>, path: String, key: &str, restart: bool) -> Result<(), String> {
@@ -386,34 +448,25 @@ fn save_folder(app: &AppHandle, state: State<'_, Arc<Mutex<Option<Backend>>>>, p
 
 #[tauri::command]
 fn set_model_folder(app: AppHandle, state: State<'_, Arc<Mutex<Option<Backend>>>>, path: String) -> Result<(), String> {
-    save_folder(&app, state, path, "model_folder", true)
+    let started = Instant::now();
+    let result = save_folder(&app, state, path, "model_folder", true);
+    diagnostics::outcome(&app, "set_model_folder", &result.clone().map(|_| Value::Null), started, false);
+    result
 }
 
 #[tauri::command]
 fn set_output_folder(app: AppHandle, state: State<'_, Arc<Mutex<Option<Backend>>>>, path: String) -> Result<(), String> {
-    save_folder(&app, state, path, "output_folder", false)
+    let started = Instant::now();
+    let result = save_folder(&app, state, path, "output_folder", false);
+    diagnostics::outcome(&app, "set_output_folder", &result.clone().map(|_| Value::Null), started, false);
+    result
 }
 
-fn send_backend_request(backend: &mut Backend, app: &AppHandle, action: &str, payload: Value) -> Result<Value, String> {
+fn send_backend_request(backend: &mut Backend, action: &str, payload: Value) -> Result<Value, String> {
     let request = json!({"action": action, "payload": payload});
-    writeln!(backend.stdin, "{request}").map_err(|e| e.to_string())?;
-    backend.stdin.flush().map_err(|e| e.to_string())?;
-    loop {
-    let mut line = String::new();
-    let read = backend.stdout.read_line(&mut line).map_err(|e| e.to_string())?;
-    if read == 0 {
-        return Err("موتور Python بسته شد.".into());
-    }
-    let response: Value = serde_json::from_str(&line)
-        .map_err(|e| format!("پاسخ نامعتبر از موتور: {e}"))?;
-    if let Some(event) = response.get("event").and_then(Value::as_str) {
-        if matches!(event, "download-progress" | "batch-progress" | "queue-progress" | "chat-progress" | "chat-token" | "chat-agent-step") {
-            let _ = app.emit(event, &response["data"]);
-            continue;
-        }
-    }
-    return Ok(response);
-    }
+    writeln!(backend.stdin, "{request}").map_err(|error| error.to_string())?;
+    backend.stdin.flush().map_err(|error| error.to_string())?;
+    backend.responses.recv().map_err(|_| "موتور Python بسته شد.".to_string())?
 }
 
 #[tauri::command]
@@ -437,17 +490,21 @@ async fn model_download(
         jobs.insert(job_id.clone(), Arc::clone(&worker));
     }
     tauri::async_runtime::spawn_blocking(move || {
+        let started = Instant::now();
+        diagnostics::record(&app, &action, "started", None, None);
         let result = (|| {
             let mut backend = start_backend(&app)?;
             worker.pid.store(backend.child.id(), Ordering::SeqCst);
             worker.active.store(true, Ordering::SeqCst);
-            send_backend_request(&mut backend, &app, &action, payload)
+            send_backend_request(&mut backend, &action, payload)
         })();
         worker.finish();
         if let Ok(mut jobs) = workers.lock() {
             jobs.remove(&job_id);
         }
-        if worker.cancelled.swap(false, Ordering::SeqCst) && result.is_err() {
+        let cancelled = worker.cancelled.swap(false, Ordering::SeqCst) && result.is_err();
+        diagnostics::outcome(&app, &action, &result, started, cancelled);
+        if cancelled {
             return Err("Download paused; received files were kept.".into());
         }
         result
@@ -474,6 +531,10 @@ async fn backend_command(
     let state = Arc::clone(&state);
     let download = Arc::clone(&download);
     tauri::async_runtime::spawn_blocking(move || {
+    let started = Instant::now();
+    diagnostics::record(&app, &action, "started", None, None);
+    let mut cancelled = false;
+    let outcome = (|| {
     let mut guard = state.lock().map_err(|_| "موتور برنامه در دسترس نیست".to_string())?;
     if guard.is_none() {
         *guard = Some(start_backend(&app)?);
@@ -485,16 +546,20 @@ async fn backend_command(
         download.pid.store(backend.child.id(), Ordering::SeqCst);
         download.active.store(true, Ordering::SeqCst);
     }
-    let outcome = send_backend_request(backend, &app, &action, payload);
+    let outcome = send_backend_request(backend, &action, payload);
     if is_download {
         download.finish();
     }
     if outcome.is_err() {
         *guard = None;
         if download.cancelled.swap(false, Ordering::SeqCst) {
+            cancelled = true;
             return Err("عملیات متوقف شد. فایل‌های ساخته یا دریافت‌شده حفظ شده‌اند.".into());
         }
     }
+    outcome
+    })();
+    diagnostics::outcome(&app, &action, &outcome, started, cancelled);
     outcome
     }).await.map_err(|e| format!("فرمان برنامه متوقف شد: {e}"))?
 }
@@ -550,24 +615,36 @@ pub fn run() {
         .manage(Arc::new(Mutex::<Option<Backend>>::new(None)))
         .manage(Arc::new(DownloadState::new()))
         .manage(ModelDownloadState(Arc::new(Mutex::new(HashMap::new()))))
-        .invoke_handler(tauri::generate_handler![install_app_update, backend_command, model_download, cancel_model_download, notify_image_ready, cancel_download, set_model_folder, set_output_folder, setup_status, setup_install, update_diffusers_engine, hardware_usage])
+        .setup(|app| {
+            diagnostics::record(app.handle(), "startup", "success", None, None);
+            Ok(())
+        })
+        .invoke_handler(tauri::generate_handler![activity_read, activity_clear, activity_interface_error, install_app_update, backend_command, model_download, cancel_model_download, notify_image_ready, cancel_download, set_model_folder, set_output_folder, setup_status, setup_install, update_diffusers_engine, hardware_usage])
         .run(tauri::generate_context!())
         .expect("failed to run Tauri app");
 }
 
 #[tauri::command]
 async fn install_app_update(app: tauri::AppHandle) -> Result<(), String> {
-    use tauri_plugin_updater::UpdaterExt;
 
     if cfg!(debug_assertions) || std::env::current_exe().ok()
         .is_some_and(|exe| exe.with_file_name("nocturne.portable").is_file()) {
         return Ok(());
     }
+    let started = Instant::now();
+    let result = check_app_update(&app).await;
+    diagnostics::outcome(&app, "install_app_update", &result.clone().map(|_| Value::Null), started, false);
+    result
+}
+
+async fn check_app_update(app: &AppHandle) -> Result<(), String> {
+    use tauri_plugin_updater::UpdaterExt;
     let updater = app.updater_builder()
         .timeout(std::time::Duration::from_secs(8))
         .build()
         .map_err(|error| error.to_string())?;
     if let Some(update) = updater.check().await.map_err(|error| error.to_string())? {
+        diagnostics::record(app, "install_app_update", "started", None, None);
         update.download_and_install(|_, _| {}, || {}).await.map_err(|error| error.to_string())?;
         #[cfg(target_os = "linux")]
         app.restart();

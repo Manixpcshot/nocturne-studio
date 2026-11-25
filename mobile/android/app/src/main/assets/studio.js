@@ -1,6 +1,12 @@
 "use strict";
 
 const text = {
+  activityTitle: ["Activity log", "گزارش فعالیت"], activityAll: ["All statuses", "همهٔ وضعیت‌ها"],
+  activityClear: ["Clear history", "پاک کردن گزارش"], activityEmpty: ["No recorded activity.", "رویدادی ثبت نشده."],
+  activityConfirm: ["Clear all activity records?", "گزارش فعالیت پاک شود؟"],
+  activityDownloads: ["Downloads", "دانلودها"],
+  activity_started: ["Started", "شروع"], activity_completed: ["Completed", "انجام شد"],
+  activity_stopped: ["Stopped", "متوقف شد"], activity_error: ["Error", "خطا"], activity_retry: ["Retry", "تلاش دوباره"],
   chat: ["Chat", "چت"], text: ["Text", "متن"], imageModels: ["Image", "تصویر"],
   chatIntro: ["Generate text offline with llama.cpp on your CPU.", "با موتور llama.cpp روی پردازندهٔ گوشی، آفلاین متن بساز."],
   textModel: ["Text model", "مدل متنی"], chatPrompt: ["Write a message…", "پیام را بنویس…"],
@@ -414,7 +420,19 @@ function sendChat() {
   drawChat();
 }
 
+function drawDeviceActivity() {
+  const phase = $("activity-filter").value;
+  const events = (data.activity || []).filter(item => !phase || item.phase === phase);
+  const date = new Intl.DateTimeFormat(language, { dateStyle: "short", timeStyle: "short" });
+  const rows = events.map(item => '<div class="activity-record" data-phase="' + esc(item.phase) + '"><div><strong>' +
+    esc(t(item.section === "downloads" ? "activityDownloads" : item.section)) + '</strong><small>' +
+    esc(t("activity_" + item.phase)) + (item.detail ? " · " + esc(t(item.detail)) : "") +
+    '</small></div><time><bdi>' + esc(date.format(item.time)) + '</bdi></time></div>');
+  replace("device-activity", rows.join("") || '<p class="hint">' + t("activityEmpty") + '</p>');
+}
+
 function drawHardware() {
+  drawDeviceActivity();
   const device = data.hardware;
   const stat = (key, value, detail = "") => '<div class="stat"><span>' + t(key) + '</span><strong><bdi>' + esc(value || t("unavailable")) +
     "</bdi></strong>" + (detail ? "<small><bdi>" + esc(detail) + "</bdi></small>" : "") + "</div>";
@@ -529,6 +547,7 @@ document.addEventListener("click", (event) => {
     case "select": bridge?.select(value); switchView(data.models.some((item) => item.id === value && item.task === "text") ? "chat" : "studio"); break;
     case "findText": filter = "text"; switchView("models"); break;
     case "chatSend": sendChat(); break;
+    case "clearActivity": if (window.confirm(t("activityConfirm"))) bridge?.clearActivity(); break;
     case "checkUpdate": bridge?.checkUpdate(); break;
     case "installUpdate": bridge?.installUpdate(); break;
     case "engine": bridge?.engine(value); break;
@@ -546,6 +565,7 @@ document.addEventListener("click", (event) => {
   }
 });
 document.addEventListener("change", (event) => {
+  if (event.target.id === "activity-filter") drawDeviceActivity();
   if (event.target.id === "chat-select") bridge?.select(event.target.value);
   if (event.target.id === "model-select") bridge?.select(event.target.value);
   if (event.target.id === "engine-select" && !engineUnavailable(event.target.value)) bridge?.engine(event.target.value);

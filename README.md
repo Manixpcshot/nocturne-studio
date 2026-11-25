@@ -60,6 +60,10 @@ Download the amd64 Debian package from Releases and install with `sudo apt insta
 
 The Debian package includes stable-diffusion.cpp CPU and Vulkan builds. For compatible GGUF images it prefers Vulkan when a hardware GPU is detected with `vulkaninfo`. Set `NOCTURNE_SD_ENGINE=cpu` or `NOCTURNE_SD_ENGINE=vulkan` before starting the app to choose explicitly. Diffusers uses PyTorch on the CPU or a supported NVIDIA GPU. Chat on Windows and Debian offers CPU, Vulkan, NVIDIA CUDA, AMD ROCm and Intel OpenVINO llama.cpp runtimes, plus Ollama. The GPU runtimes require a compatible driver and are installed only when selected. Search for “Piper” in the voice model catalog for the Amir and Ganji Persian ONNX voices.
 
+## Activity log
+
+Open Activity log from the desktop sidebar to review recent operations, filter errors, and export the visible entries as JSON. On Android, open Device and expand Activity log. Logs are local and bounded. They contain operation names and status categories, and omit prompts, conversations, passwords and paths. Conversation export is a separate action in Chat.
+
 ## App updates
 
 Install a current release manually once to enable updates. The installed Windows version checks GitHub at startup and verifies the installer signature before handing off to setup. Debian checks the signed package at startup and asks for administrator authorization before installing. Portable Windows copies are updated by replacing the extracted ZIP. On Android, the app downloads a newer signed APK when opened and prompts you to confirm installation.

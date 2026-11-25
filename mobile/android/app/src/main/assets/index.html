@@ -88,6 +88,16 @@
       <div id="update-card" class="composer"></div>
       <h2 class="section-title" data-text="engine">Image engine</h2>
       <div id="engine-list" class="engine-list"></div>
+      <details class="composer device-activity"><summary data-text="activityTitle">Activity log</summary>
+        <div class="activity-tools">
+          <select id="activity-filter" aria-label="Activity status">
+            <option value="" data-text="activityAll">All statuses</option>
+            <option value="error" data-text="activity_error">Error</option>
+          </select>
+          <button class="quiet" data-action="clearActivity" data-text="activityClear">Clear history</button>
+        </div>
+        <div id="device-activity"></div>
+      </details>
     </section>
   </main>
   <nav class="nav" id="nav" aria-label="Nocturne"></nav>

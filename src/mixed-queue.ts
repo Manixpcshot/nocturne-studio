@@ -11,7 +11,8 @@ type Hooks = {
 
 export function mountMixedQueue(parent: Element, hooks: Hooks) {
   const panel = document.createElement('details');
-  panel.className = 'workflow-section model-card';
+  panel.className = 'workflow-section model-card mixed-workflow';
+  panel.open = true;
   const heading = document.createElement('summary');
   const fields = document.createElement('div');
   fields.className = 'workflow-fields';

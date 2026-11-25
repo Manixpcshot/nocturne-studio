@@ -210,3 +210,10 @@ body { display: grid; min-height: 0; grid-template: "top" auto "activity" auto "
 .chat-message { white-space: pre-wrap; overflow-wrap: anywhere; padding: 10px 13px; border: 1px solid var(--edge); border-radius: 12px; }
 .chat-message.user { background: var(--ink); }
 .chat-actions { justify-content: flex-end; }
+
+.device-activity summary { font-weight: 700; cursor: pointer; }
+.device-activity .activity-tools { display: flex; gap: 8px; align-items: center; margin-block: 8px; }
+#device-activity { max-height: 25rem; overflow: auto; }
+.activity-record { display: flex; gap: 8px; justify-content: space-between; padding-block: 7px; border-bottom: 1px solid var(--edge); }
+.activity-record :is(small,time) { display: block; font-size: .72rem; color: var(--muted); }
+.activity-record[data-phase="error"] small { color: #ff9eaa; }

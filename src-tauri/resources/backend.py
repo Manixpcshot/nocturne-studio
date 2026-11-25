@@ -2959,8 +2959,10 @@ class WebHandler(BaseHTTPRequestHandler):
                     shutil.move(str(metadata), str(folder / metadata.name))
                 user["used"] += 1
                 save_web_config(data)
+                emit_event("diagnostic", {"action": "web_generate", "ok": True})
                 return self.send_json(200, {"image": result["image"], "model": result["model"]})
             except Exception as error:
+                emit_event("diagnostic", {"action": "web_generate", "ok": False})
                 return self.send_json(500, {"error": str(error)[:300]})
         finally:
             WEB_PROGRESS.pop(username, None)
@@ -3334,12 +3336,13 @@ else:
     for line in sys.stdin:
         try:
             request = json.loads(line)
-            if request["action"] in ("load", "generate", "edit_image", "image_input_capability", "device", "unload", "cache_mode", "batch_generate", "batch_queue"):
+            if request["action"] in ("load", "generate", "edit_image", "image_input_capability", "device", "unload", "cache_mode", "batch_generate", "batch_queue", "media_workflow_job", "generate_video", "test_image_runtime"):
                 with WEB_LOCK:
                     data = dispatch(request["action"], request.get("payload") or {})
             else:
                 data = dispatch(request["action"], request.get("payload") or {})
             result = {"ok": True, "data": data}
         except Exception as error:
-            result = {"ok": False, "error": str(error)}
-        print(json.dumps(result, ensure_ascii=False), file=sys.__stdout__, flush=True)
+            result = {"ok": False, "error": str(error), "error_kind": type(error).__name__}
+        with progress_lock:
+            print(json.dumps(result, ensure_ascii=False), file=sys.__stdout__, flush=True)
