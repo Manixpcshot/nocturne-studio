@@ -1,6 +1,6 @@
 [package]
 name = "nocturne-studio"
-version = "2.9.2"
+version = "2.9.3"
 description = "Desktop image generation studio"
 authors = ["Codex"]
 edition = "2021"

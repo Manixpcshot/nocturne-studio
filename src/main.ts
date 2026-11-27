@@ -2522,6 +2522,7 @@ async function initialize() {
 }
 
 const UPDATE_INTERVAL = 60 * 60 * 1000;
+const UPDATE_RETRY_DELAYS = [10000, 30000];
 let updateScheduled = false;
 let updateInProgress = false;
 let updateInstallTimer: number | undefined;
@@ -2547,8 +2548,11 @@ async function installPendingUpdate() {
 function scheduleAppUpdates() {
   if (updateScheduled) return;
   updateScheduled = true;
-  const check = async () => {
+  let retryTimer: number | undefined;
+  const check = async (attempt = 0) => {
     if (updateInProgress) return;
+    window.clearTimeout(retryTimer);
+    retryTimer = undefined;
     updateInProgress = true;
     try {
       const update = await invoke<{version: string; portable: boolean} | null>('check_app_update');
@@ -2566,12 +2570,14 @@ function scheduleAppUpdates() {
       updateInstallTimer = window.setTimeout(installPendingUpdate, 0);
     } catch (error) {
       console.warn('App update check failed', error);
+      const delay = UPDATE_RETRY_DELAYS[attempt];
+      if (delay !== undefined) retryTimer = window.setTimeout(() => void check(attempt + 1), delay);
     } finally {
       updateInProgress = false;
     }
   };
   void check();
-  window.setInterval(check, UPDATE_INTERVAL);
+  window.setInterval(() => void check(), UPDATE_INTERVAL);
 }
 
 async function boot() {
